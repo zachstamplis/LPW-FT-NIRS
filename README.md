@@ -9,3 +9,4 @@ Will additionally include:
 - various multivariate modelling approaches (PLS, PCR, MLR)
 - model selection (AIC? AICc??)
 
+Spectral data included in LPW_scans folder
