@@ -1,0 +1,174 @@
+# LPW
+
+This RMD serves as a guide/lab journal to document my methods for processing and modelling FT-NIRS otolith spectra from juvenile Pacific cod (__Gadus macrocephalus__) in the Gulf of Alaska.  These scans were acquired on a Bruker MPA II with an integrating sphere, 5mm. teflon disk taped over the scanning window and gold transflectance stamp placed over the top of samples.  Spectra were collected between 11,500 and 4,000 cm^-1^ with a resolution of 16 cm^-1^ and 64 replicate scans.
+
+LPW Scans refer to specimens collected near Little Port Walter (LPW), a NOAA research station located near the southern tip of Baranof Island in Southeast Alaska.  Juvenile cod were collected using beach and purse seines from embayments near LPW on July 27-28, 2020. These fish were transferred into outdoor net pens at LPW to be reared in captivity.  Specimens were collected approximately weekly (ADD MORE IN HERE LATER)
+
+### Load necessary packages
+This code borrowed from __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  Packages used include _dplyr_ for easier data manipulation, _ggplot2_ for clear looking figures, _opusreader2_ to import FT-NIRS spectral data, _prospectr_ for FT-NIRS preprocessing (ADD MORE IN HERE)
+
+```{r, results = 'hide', warning = F, message = F}
+# Install packages not yet installed
+packages <- c("dplyr", "tidyr", "EMSC", "purrr", "devtools", "hyperSpec", "prospectr", "data.table", "opusreader2", "splitstackshape", "ggplot2", "viridis")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  utils::install.packages(pkgs = packages[!installed_packages])
+}
+invisible(lapply(packages, library, character.only = TRUE)) # load all packages in list
+
+# install packages not on CRAN
+if (!require("remotes")) install.packages("remotes")
+if (!require("opusreader2")) {
+  remotes::install_github("spectral-cockpit/opusreader2")
+  library("opusreader2")
+} 
+if (!require("simplerspec")) {
+  remotes::install_github("philipp-baumann/simplerspec")
+  library("simplerspec")
+} 
+# not sure if I need this one?  
+#if (!require("hyperSpec.utils")) {
+#  remotes::install_github("konradmayer/hyperSpec.utils",dependencies=TRUE)
+#  library("hyperSpec.utils")
+#} 
+
+rm(installed_packages) # remove objects from environment
+rm(packages)
+```
+
+
+
+### Grabbing filenames from .0 files for metadata .csv
+The Bruker MPA outputs FT-NIRS spectra in a .0 format.  Prior to loading spectral data, a metadata .csv (__LPW_metadata.csv__) was created to pair specimen numbers, lengths & otolith weights with their respective FT-NIRS scans. Included in this metadata file is a column with each scans .0 filename.  
+
+All file names in a folder can be generated with list.files().  For pulling file names to create a new .csv, you can use:
+
+
+```{r, results = 'hide'}
+cat(list.files(path = "LPW_scans/",), "\n") # concatenates all filenames in a directory and adds a space delimiter
+```
+This output (without index numbers in square brackets) can be copied and pasted into Excel, then converted into columns using the "Data -> Text to Columns" function and selecting a "space" delimiter.  These columns can then be transposed into a "filename" column.  
+
+### Reading in FT-NIRS spectra from a Bruker MPA II
+First read-in my metadata .csv and convert the session_title (i.e. scan #) to a factor.  LPW FT-NIRS scans were taken in triplicate (NIR_LPW202001202_otoliths, ...otoliths_rescan_1, ...otoliths_rescan_2) to see if spectra changed after storage.  Metadata for LPW contained an additional entry (..._rescan_3) with some notes and comments, however I will only be importing the metadata for actual scans.
+```{r}
+setwd("/Users/zachstamplis/Desktop/Thesis and Otoliths/Pcod/LPW/LPW_FT-NIRS")
+#source("LPW2020spectra.rmd", chdir = TRUE)
+meta_LPW <- read.csv("LPW_metadata.csv")
+names(meta_LPW)
+levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to factor (three scans taken at separate times).  
+
+meta_LPW<-meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2"),]
+
+meta_LPW<-meta_LPW[meta_LPW$file_name !="",] # remove any rows that are missing a file_name in the metadata, suggesting no file exists.  
+
+# make sure you have the same number of specimens for each scan session (122 specimens, 366 total scans)
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths"),])
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_1"),])
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_2"),])
+# the first scan of specimen 66 is missing and will be excluded for analysis.
+
+# generate file paths to import with Opusreader
+setwd("LPW_scans/") # setwd to folder containing FT-NIRS scans
+meta_LPW$file_path<-paste0(getwd(),"/",meta_LPW$file_name)
+Opusfiles<-as.vector(meta_LPW$file_path)
+exists<-as.vector(lapply(Opusfiles, file.exists)) # check that I have all my files or else I get an error when I read them in
+meta_LPW$exists<-exists
+meta_LPW1<-meta_LPW[meta_LPW$exists=="TRUE",] # filter the file list and data by otoliths with spectra files
+Opusfiles<-as.vector(meta_LPW1$file_path) # I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
+rm(exists)
+rm(meta_LPW1)
+```
+
+Once all metadata has been imported, .0 FT-NIRS scan files can be imported using opusreader2 and read_opus.  First a single file is read in to make sure everything looks good; then loading all .0 files with the Opusfiles object.  read_opus() creates a massive list of lists that includes information about MPA II settings, metadata generated during scans, specimen names, etc.  See ?read_opus() from the opusreader2 package for more details on the list structure of .0 files.
+
+```{r, warning=FALSE}
+# read a single file (one measurement) to check
+file <- Opusfiles[1]
+data_list <- opusreader2::read_opus(dsn = file) # NA's seem to be introduced due to a timestamp metadata issue, currently using suppressWarnings to hide the annoying output, but this is normal.  
+rm(data_list)
+rm(file)
+SPCfiles_nooffset <- suppressWarnings(lapply(Opusfiles, opusreader2::read_opus)) # Read in all files in the Opusfiles list.  This gives an error if any file names or paths are wrong.
+
+# uncomment to see additional output from .0 files
+
+# str(SPCfiles_nooffset[[1]]) # check first element
+# SPCfiles_nooffset[[1]][[1]]$ab$data # can see spc values this way I think
+# SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters #this has info about what setting was used (here otolith), species, and file name
+SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FC2$parameter_value # species
+SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FD1$parameter_value # unique ID. Then paste with .0 to get full file name
+# SPCfiles_nooffset[[1]][[1]]$ab$wavenumbers # wavenumbers scanned
+SPCfiles_nooffset[[1]][[1]]$instrument_ref$parameters$INS$parameter_value # instrument name
+
+```
+Once loaded, FT-NIRS scan data can be extracted from the lists.  
+```{r}
+spectra <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$data) # FT-NIRS scan data
+file_id <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FD1$parameter_value) # file ID in Opus
+species <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FC2$parameter_value) # species
+instrument <- lapply(SPCfiles_nooffset, function(x) x[[1]]$instrument_ref$parameters$INS$parameter_value) # instrument exists for all files, but
+wavenumber <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$wavenumbers) # these could differ if settings changed or in light sources change
+
+spectra <- lapply(spectra, as.data.frame)
+# str(spectra[[1]])
+
+for (i in 1:length(spectra)) {
+  colnames(spectra[[i]]) <- wavenumber[[i]] # need to assign column  names first or else there will be an issue with subsequent names added
+}
+for (i in 1:length(spectra)) {
+  spectra[[i]]$species <- species[[i]]
+}
+for (i in 1:length(spectra)) {
+  spectra[[i]]$file_id <- file_id[[i]]
+}
+for (i in 1:length(spectra)) {
+  spectra[[i]]$instrument <- instrument[[i]]
+}
+for (i in 1:length(spectra)) {
+  spectra[[i]]$file_path <- Opusfiles[[i]]
+}
+
+try <- spectra[[1]] # test code on one file
+splitstackshape::cSplit(as.data.frame(try$file_path), sep = "/", splitCols = "try$file_path", type.convert = FALSE) %>% select(tail(names(.), 1))
+rm(try)
+
+file_name <- lapply(spectra, function(x) splitstackshape::cSplit(as.data.frame(x$file_path), sep = "/", splitCols = "x$file_path", type.convert = FALSE) %>% select(tail(names(.), 1)))
+file_name[[1]][[1, 1]]
+for (i in 1:length(spectra)) {
+  spectra[[i]]$file_name <- file_name[[i]][[1, 1]]
+}
+rm(file_id, file_name, instrument, species, wavenumber, Opusfiles, i)
+```
+# Building a spectral dataframe after importing .0 scans
+```{r}
+df <- as.data.frame(do.call(rbind, spectra))
+dfmeta_LPW <- dplyr::left_join(meta_LPW, df, by = c("file_name", "file_path"))
+dfmeta_LPW <- dfmeta_LPW %>% select(-c("exists","instrument"))
+rm(meta_LPW, df, spectra, SPCfiles_nooffset)
+colnames(dfmeta_LPW) <- as.character(colnames(dfmeta_LPW))
+dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # make long format, excluding all non-measurement columns
+dfmeta_longLPW<-dfmeta_longLPW%>%rename(.,"wavenumber"="name") # rename wavenumber column
+# fix class of measurements to a numeric
+dfmeta_longLPW$wavenumber<-as.numeric(as.character(dfmeta_longLPW$wavenumber))
+
+# Plot to see if data loaded properly.  
+ggplot()+
+  geom_path(data=dfmeta_longLPW[dfmeta_longLPW$specimen %in% c(1,10,100,101, 102,103,104), ],aes(x=wavenumber,y=value,color=session_title,group=file_name),linewidth=.5)+ 
+  scale_x_reverse()+
+  labs(y="Absorbance units",x= expression(paste("Wavenumber ", cm^-1)))+
+  theme(axis.text =element_text(size=10),
+        #axis.text.x =element_text(size=12,angle=25),
+        axis.title=element_text(size=12),
+        #legend.position = "none",
+        strip.text = element_text(size=14),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  facet_wrap(~specimen)
+
+```
+# Now pre-process spectra
+
