@@ -1,7 +1,7 @@
 ---
 output: html_document
 editor_options: 
-  chunk_output_type: console
+  chunk_output_type: inline
 ---
 # LPW
 
@@ -204,8 +204,9 @@ ggplot(dfmeta_longLPW %>% filter(run_number != 1)) + geom_path(aes(x = wavenumbe
   scale_color_viridis(discrete = T)
 # These should be triplicate scans with identical values for each of the 122 specimens.  To confirm, I'll extract/plot the first 2 principal components for all FT-NIRS wavenumbers (indices 21:ncol(dfmeta_LPW)) and color points by run number.
 pca_all_LPW <- pca(dfmeta_LPW[21:nrow(dfmeta_LPW)], scale = T)
-dfmeta_LPW$pc1 <- pca_all_LPW$calres$scores[,1] # extract scores for PC1
-dfmeta_LPW$pc2 <- pca_all_LPW$calres$scores[,2] # extract scores for PC2
+dfmeta_LPW <- cbind(pc2 = pca_all_LPW$calres$scores[,2], dfmeta_LPW) # extract scores for PC2
+dfmeta_LPW <- cbind(pc1 = pca_all_LPW$calres$scores[,1], dfmeta_LPW) # extract scores for PC1
+
 # plot PC1 & PC2, colored by run_number
 ggplot(dfmeta_LPW) + 
   geom_point(aes(x = pc1, y = pc2, color = run_number), size = 3) + 
@@ -229,12 +230,122 @@ scan_3 <- dfmeta_LPW %>% filter(run_number == 3)
 # scan_3_long <- pivot_longer(scan_3, cols = `11536`:`3952`, names_to = "name", values_to = "value")
 # scan_3_long$name <- as.numeric(scan_3_long$name)
 scan_avg <- NULL
-scan_avg <- bind_cols(scan_avg, scan_2[, 1:20])
-scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(scan_3)]) / 2)
+scan_avg <- bind_cols(scan_avg, scan_2[, 1:22])
+scan_avg <- bind_cols(scan_avg, (scan_2[, 23:ncol(scan_2)] + scan_3[, 23:ncol(scan_3)]) / 2)
 rm(scan_2, scan_3)
 scan_avg_long <- pivot_longer(scan_avg, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+scan_avg_long$name <- as.numeric(scan_avg_long$name)
 ```
 
 
 # Preprocessing Spectra
-Initial preprocessing
+Initial preprocessing done with prospectr and a savitzkygolay filter.  might make more sense to preprocess after selecting important variables?  Some functions included to play around with some preprocessing filters and select optimal filters.
+
+```{r, cache = T}
+spec.fig <- function(mydf, color) { # ggplot function to swap out color
+  ggplot(mydf) +
+    geom_path(aes(x = name, y = value, color = {{ color }}, group = file_name)) +
+    scale_x_reverse() +
+    scale_color_viridis() + 
+    labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1)))
+    #theme(axis.text = element_text(size = 16),
+      # axis.text.x = element_text(size = 12, angle = 25),
+      # axis.title = element_text(size = 14),
+      # legend.position = "right",
+      # strip.text = element_text(size = 14),
+      # legend.text = element_text(size = 14),
+      # legend.title = element_text(size = 14),
+      # panel.grid.major = element_blank(),
+      # panel.grid.minor = element_blank(),
+      # panel.background = element_blank(),
+      # axis.line = element_line(colour = "black")
+    #)
+}
+sg_plotting <- function(color, m, p, w) {
+  dftempproc <- as.data.frame(
+    cbind(scan_avg[, c(1:22)],
+          savitzkyGolay(scan_avg[,23:length(scan_avg)],
+                        m = m, p = p, w = w)
+  ))
+  dftempproc_long <- tidyr::pivot_longer(dftempproc, cols = c(23:length(dftempproc)))
+  dftempproc_long$name <- as.numeric(as.character(dftempproc_long$name))
+  spec.fig(mydf = dftempproc_long, color = {{ color }}) + 
+    ggtitle(paste("diff = ", {{ m }}, "poly = ", {{ p}}, "window = ", {{ w }}))
+}
+
+sg_plotting(specimen,2,3,25)
+
+quickproc <- function(m, p, w){
+  temp_proc <<- as.data.frame(
+    cbind(scan_avg[, c(1:22)],
+          savitzkyGolay(scan_avg[,23:length(scan_avg)],
+                        m = m, p = p, w = w)
+  ))
+  temp_proc_long <<- tidyr::pivot_longer(temp_proc, cols = c(23:length(temp_proc)))
+  temp_proc_long$name <<- as.numeric(as.character(temp_proc_long$name))
+}
+
+quickproc(2,3,15)
+spec.fig(temp_proc_long,specimen)
+
+sg_plotting(length,2,3,15)
+```
+
+# Variable/Wavelength Selection & PLS
+Using temp_proc df produced from quickproc() function above.  VIP score to select wavelengths that are most informative to model
+```{r, cache = T}
+test_pls <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 4],
+  scale = FALSE, center = TRUE, info = "Length Prediction Model",
+  cv = 1
+)
+plot(test_pls)
+test_vip <- vipscores(test_pls)
+plotVIPScores(test_pls)
+
+test_waves <- names(subset(test_vip[,1], test_vip[,1] > 2))
+all_waves <- names(temp_proc[,23:length(temp_proc)])
+bad_waves <- all_waves[!(all_waves %in% test_waves)]
+
+
+test_pls_VIP <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 4],
+  scale = FALSE, center = TRUE, info = "Length Prediction Model",
+  cv = 1,exclcols = bad_waves
+)
+plot(test_pls_VIP)
+plot(test_pls)
+```
+
+# MLR & PCA
+
+```{r, cache = T}
+pca_avg_LPW <- pca(scan_avg[23:nrow(scan_avg)], scale = T)
+mlr_pcs <- pca_avg_LPW$calres$scores[,1:20]
+mlr_df <- cbind(mlr_pcs[,1:5], scan_avg[,1:4])
+
+# split into test and train datasets
+set.seed(1)
+idx <- floor(nrow(scan_avg) * 0.9)
+train_idx <- sample(seq_len(nrow(scan_avg)), size = idx)
+train <- scan_avg[train_idx, -c(1:2,3,5:33)] 
+test <- scan_avg[-train_idx, -c(1:2,3,5:33)] 
+
+library(pls)
+pcr_model <- pcr(length ~ .,
+                 data = train, 
+                 scale = T,
+                 validation = "CV",
+                 ncomp = 10)
+
+fit <- as.data.frame(pcr_model$fitted.values[,,3])
+fit <- fit %>% 
+  arrange(as.numeric(row.names(.)))
+names(fit)[1] <- "fit"
+ggplot() + geom_point(aes(x = fit$fit, y = train[,1])) + 
+  geom_abline(slope = 1, col = "red")
+
+pcr_pred <- predict(pcr_model, newdata=test, ncomp = 3)
+ggplot() + geom_point(aes(x = pcr_pred, y = test[,1])) + 
+  geom_abline(slope = 1, col = "red")
+
+```
+
