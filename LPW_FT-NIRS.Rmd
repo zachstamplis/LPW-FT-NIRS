@@ -1,3 +1,8 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
 # LPW
 
 This RMD serves as a guide/lab journal to document my methods for processing and modelling FT-NIRS otolith spectra from juvenile Pacific cod (__Gadus macrocephalus__) in the Gulf of Alaska.  These scans were acquired on a Bruker MPA II with an integrating sphere, 5mm. teflon disk taped over the scanning window and gold transflectance stamp placed over the top of samples.  Spectra were collected between 11,500 and 4,000 cm^-1^ with a resolution of 16 cm^-1^ and 64 replicate scans.
@@ -7,9 +12,9 @@ LPW Scans refer to specimens collected near Little Port Walter (LPW), a NOAA res
 ### Load necessary packages
 This code borrowed from __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  Packages used include _dplyr_ for easier data manipulation, _ggplot2_ for clear looking figures, _opusreader2_ to import FT-NIRS spectral data, _prospectr_ for FT-NIRS preprocessing (ADD MORE IN HERE)
 
-```{r, results = 'hide', warning = F, message = F}
+```{r, results = 'hide', warning = F, message = F, cache = T}
 # Install packages not yet installed
-packages <- c("dplyr", "tidyr", "EMSC", "purrr", "devtools", "hyperSpec", "prospectr", "data.table", "opusreader2", "splitstackshape", "ggplot2", "viridis")
+packages <- c("dplyr", "tidyr", "EMSC", "purrr", "devtools", "hyperSpec", "prospectr", "data.table", "mdatools", "opusreader2", "splitstackshape", "ggplot2", "viridis")
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   utils::install.packages(pkgs = packages[!installed_packages])
@@ -21,16 +26,16 @@ if (!require("remotes")) install.packages("remotes")
 if (!require("opusreader2")) {
   remotes::install_github("spectral-cockpit/opusreader2")
   library("opusreader2")
-} 
+}
 if (!require("simplerspec")) {
   remotes::install_github("philipp-baumann/simplerspec")
   library("simplerspec")
-} 
-# not sure if I need this one?  
-#if (!require("hyperSpec.utils")) {
+}
+# not sure if I need this one?
+# if (!require("hyperSpec.utils")) {
 #  remotes::install_github("konradmayer/hyperSpec.utils",dependencies=TRUE)
 #  library("hyperSpec.utils")
-#} 
+# }
 
 rm(installed_packages) # remove objects from environment
 rm(packages)
@@ -44,48 +49,48 @@ The Bruker MPA outputs FT-NIRS spectra in a .0 format.  Prior to loading spectra
 All file names in a folder can be generated with list.files().  For pulling file names to create a new .csv, you can use:
 
 
-```{r, results = 'hide'}
-cat(list.files(path = "LPW_scans/",), "\n") # concatenates all filenames in a directory and adds a space delimiter
+```{r, results = 'hide', cache = T, collapse = T}
+cat(list.files(path = "LPW_scans/", ), "\n") # concatenates all filenames in a directory and adds a space delimiter
 ```
 This output (without index numbers in square brackets) can be copied and pasted into Excel, then converted into columns using the "Data -> Text to Columns" function and selecting a "space" delimiter.  These columns can then be transposed into a "filename" column.  
 
 ### Reading in FT-NIRS spectra from a Bruker MPA II
 First read-in my metadata .csv and convert the session_title (i.e. scan #) to a factor.  LPW FT-NIRS scans were taken in triplicate (NIR_LPW202001202_otoliths, ...otoliths_rescan_1, ...otoliths_rescan_2) to see if spectra changed after storage.  Metadata for LPW contained an additional entry (..._rescan_3) with some notes and comments, however I will only be importing the metadata for actual scans.
-```{r}
+```{r, cache = T}
 setwd("/Users/zachstamplis/Desktop/Thesis and Otoliths/Pcod/LPW/LPW_FT-NIRS")
-#source("LPW2020spectra.rmd", chdir = TRUE)
+# source("LPW2020spectra.rmd", chdir = TRUE)
 meta_LPW <- read.csv("LPW_metadata.csv")
 names(meta_LPW)
-levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to factor (three scans taken at separate times).  
+levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to factor (three scans taken at separate times).
 
-meta_LPW<-meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2"),]
+meta_LPW <- meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2"), ]
 
-meta_LPW<-meta_LPW[meta_LPW$file_name !="",] # remove any rows that are missing a file_name in the metadata, suggesting no file exists.  
+meta_LPW <- meta_LPW[meta_LPW$file_name != "", ] # remove any rows that are missing a file_name in the metadata, suggesting no file exists.
 
 # make sure you have the same number of specimens for each scan session (122 specimens, 366 total scans)
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths"),])
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_1"),])
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_2"),])
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths"), ])
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_1"), ])
+nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_2"), ])
 # the first scan of specimen 66 is missing and will be excluded for analysis.
 
 # generate file paths to import with Opusreader
 setwd("LPW_scans/") # setwd to folder containing FT-NIRS scans
-meta_LPW$file_path<-paste0(getwd(),"/",meta_LPW$file_name)
-Opusfiles<-as.vector(meta_LPW$file_path)
-exists<-as.vector(lapply(Opusfiles, file.exists)) # check that I have all my files or else I get an error when I read them in
-meta_LPW$exists<-exists
-meta_LPW1<-meta_LPW[meta_LPW$exists=="TRUE",] # filter the file list and data by otoliths with spectra files
-Opusfiles<-as.vector(meta_LPW1$file_path) # I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
+meta_LPW$file_path <- paste0(getwd(), "/", meta_LPW$file_name)
+Opusfiles <- as.vector(meta_LPW$file_path)
+exists <- as.vector(lapply(Opusfiles, file.exists)) # check that I have all my files or else I get an error when I read them in
+meta_LPW$exists <- exists
+meta_LPW1 <- meta_LPW[meta_LPW$exists == "TRUE", ] # filter the file list and data by otoliths with spectra files
+Opusfiles <- as.vector(meta_LPW1$file_path) # I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
 rm(exists)
 rm(meta_LPW1)
 ```
 
 Once all metadata has been imported, .0 FT-NIRS scan files can be imported using opusreader2 and read_opus.  First a single file is read in to make sure everything looks good; then loading all .0 files with the Opusfiles object.  read_opus() creates a massive list of lists that includes information about MPA II settings, metadata generated during scans, specimen names, etc.  See ?read_opus() from the opusreader2 package for more details on the list structure of .0 files.
 
-```{r, warning=FALSE}
+```{r, cache = T, warning=FALSE}
 # read a single file (one measurement) to check
 file <- Opusfiles[1]
-data_list <- opusreader2::read_opus(dsn = file) # NA's seem to be introduced due to a timestamp metadata issue, currently using suppressWarnings to hide the annoying output, but this is normal.  
+data_list <- opusreader2::read_opus(dsn = file) # NA's seem to be introduced due to a timestamp metadata issue, currently using suppressWarnings to hide the annoying output, but this is normal.
 rm(data_list)
 rm(file)
 SPCfiles_nooffset <- suppressWarnings(lapply(Opusfiles, opusreader2::read_opus)) # Read in all files in the Opusfiles list.  This gives an error if any file names or paths are wrong.
@@ -99,10 +104,9 @@ SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FC2$parameter_v
 SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FD1$parameter_value # unique ID. Then paste with .0 to get full file name
 # SPCfiles_nooffset[[1]][[1]]$ab$wavenumbers # wavenumbers scanned
 SPCfiles_nooffset[[1]][[1]]$instrument_ref$parameters$INS$parameter_value # instrument name
-
 ```
 Once loaded, FT-NIRS scan data can be extracted from the lists.  
-```{r}
+```{r, cache = T}
 spectra <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$data) # FT-NIRS scan data
 file_id <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FD1$parameter_value) # file ID in Opus
 species <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FC2$parameter_value) # species
@@ -140,35 +144,97 @@ for (i in 1:length(spectra)) {
 rm(file_id, file_name, instrument, species, wavenumber, Opusfiles, i)
 ```
 # Building a spectral dataframe after importing .0 scans
-```{r}
+```{r, cache = T}
 df <- as.data.frame(do.call(rbind, spectra))
 dfmeta_LPW <- dplyr::left_join(meta_LPW, df, by = c("file_name", "file_path"))
-dfmeta_LPW <- dfmeta_LPW %>% select(-c("exists","instrument"))
+dfmeta_LPW <- dfmeta_LPW %>% select(-c("exists", "instrument"))
 rm(meta_LPW, df, spectra, SPCfiles_nooffset)
 colnames(dfmeta_LPW) <- as.character(colnames(dfmeta_LPW))
 dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # make long format, excluding all non-measurement columns
-dfmeta_longLPW<-dfmeta_longLPW%>%rename(.,"wavenumber"="name") # rename wavenumber column
+dfmeta_longLPW <- dfmeta_longLPW %>% rename(., "wavenumber" = "name") # rename wavenumber column
 # fix class of measurements to a numeric
-dfmeta_longLPW$wavenumber<-as.numeric(as.character(dfmeta_longLPW$wavenumber))
+dfmeta_longLPW$wavenumber <- as.numeric(as.character(dfmeta_longLPW$wavenumber))
 
-# Plot to see if data loaded properly.  
-ggplot()+
-  geom_path(data=dfmeta_longLPW[dfmeta_longLPW$specimen %in% c(1,10,100,101, 102,103,104), ],aes(x=wavenumber,y=value,color=session_title,group=file_name),linewidth=.5)+ 
-  scale_x_reverse()+
-  labs(y="Absorbance units",x= expression(paste("Wavenumber ", cm^-1)))+
-  theme(axis.text =element_text(size=10),
-        #axis.text.x =element_text(size=12,angle=25),
-        axis.title=element_text(size=12),
-        #legend.position = "none",
-        strip.text = element_text(size=14),
-        legend.text = element_text(size = 10),
-        legend.title = element_text(size = 12), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(),
-        panel.background = element_blank(), 
-        axis.line = element_line(colour = "black"))+
+# Plot to see if data loaded properly.
+ggplot() +
+  geom_path(data = dfmeta_longLPW[dfmeta_longLPW$specimen %in% c(1, 10, 100, 101, 102, 103, 104), ], 
+            aes(x = wavenumber, y = value, color = session_title, group = file_name), linewidth = .5) +
+  scale_x_reverse() +
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.text.x =element_text(size=12,angle=25),
+    axis.title = element_text(size = 12),
+    legend.position = "none",
+    strip.text = element_text(size = 14),
+    legend.text = element_text(size = 10),
+    legend.title = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black")
+  ) +
   facet_wrap(~specimen)
+```
+# Comparison between scans & PCA of all scans
+```{r, cache = T}
+# set run_number as factor for color groupings
+dfmeta_longLPW$run_number <- as.factor(dfmeta_longLPW$run_number)
+dfmeta_LPW$run_number <- as.factor(dfmeta_LPW$run_number)
+# FT-NIRS scans, all 3 runs, colored by run_number
+ggplot(dfmeta_longLPW) + geom_path(aes(x = wavenumber, y = value, 
+                                       color = run_number, group = file_name, alpha = 0.5)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(legend.position = "none") +
+  scale_color_viridis(discrete = T)
+# appears to be slightly different  values for each scan, look at 1 & 2 first
+ggplot(dfmeta_longLPW %>% filter(run_number != 3)) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(legend.position = "none") +
+  scale_color_viridis(discrete = T)
+# clearly different, now 1 & 3
+ggplot(dfmeta_longLPW %>% filter(run_number != 2)) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(legend.position = "none") +
+  scale_color_viridis(discrete = T)
+# also different, finally 2 & 3
+ggplot(dfmeta_longLPW %>% filter(run_number != 1)) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(legend.position = "none") +
+  scale_color_viridis(discrete = T)
+# These should be triplicate scans with identical values for each of the 122 specimens.  To confirm, I'll extract/plot the first 2 principal components for all FT-NIRS wavenumbers (indices 21:ncol(dfmeta_LPW)) and color points by run number.
+pca_all_LPW <- pca(dfmeta_LPW[21:nrow(dfmeta_LPW)], scale = T)
+dfmeta_LPW$pc1 <- pca_all_LPW$calres$scores[,1] # extract scores for PC1
+dfmeta_LPW$pc2 <- pca_all_LPW$calres$scores[,2] # extract scores for PC2
+# plot PC1 & PC2, colored by run_number
+ggplot(dfmeta_LPW) + 
+  geom_point(aes(x = pc1, y = pc2, color = run_number), size = 3) + 
+  labs(x = paste("PC1 (", 
+                 round(pca_all_LPW$calres$expvar[1], digits = 4),
+                 "% var. explaiend )"),
+       y = paste("PC2 (", 
+                 round(pca_all_LPW$calres$expvar[2], digits = 4),
+                 "% var. explaiend )")) +
+  scale_color_viridis(discrete = T)
+# run/scan #1 looks way different.  Something appears to have changed between scan periods, however it is unknown exactly what occurred.  All future analysis will combine measurements from scans 2 & 3 and take an average.  
 
 ```
-# Now pre-process spectra
 
+# Combining/averaging LPW FT-NRIS scans 2 & 3
+```{r, cache = T}
+scan_2 <- dfmeta_LPW %>% filter(run_number == 2)
+# scan_2_long <- pivot_longer(scan_2, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+# scan_2_long$name <- as.numeric(scan_2_long$name)
+scan_3 <- dfmeta_LPW %>% filter(run_number == 3)
+# scan_3_long <- pivot_longer(scan_3, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+# scan_3_long$name <- as.numeric(scan_3_long$name)
+scan_avg <- NULL
+scan_avg <- bind_cols(scan_avg, scan_2[, 1:20])
+scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(scan_3)]) / 2)
+rm(scan_2, scan_3)
+scan_avg_long <- pivot_longer(scan_avg, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+```
+
+
+# Preprocessing Spectra
+Initial preprocessing
