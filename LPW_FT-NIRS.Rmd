@@ -371,4 +371,103 @@ ggplot() + geom_point(aes(x = pcr_pred, y = test[,1])) +
   geom_abline(slope = 1, col = "red")
 
 ```
+# Remove specimens missing age data, pls for age
+
+```{r}
+age_only <- scan_avg %>% dplyr::filter(is.na(read_age) == FALSE)
+
+test_pls_age <- pls(age_only[, 23:ncol(age_only)], age_only[, 13],
+  scale = FALSE, center = TRUE, info = "Age Prediction Model",
+  cv = 1
+)
+plot(test_pls_age)
+
+test_vip_age <- vipscores(test_pls_age)
+plotVIPScores(test_pls_age)
+test_waves <- names(subset(test_vip_age[,1], test_vip_age[,1] > .5))
+all_waves <- names(age_only[,23:length(age_only)])
+bad_waves <- all_waves[!(all_waves %in% test_waves)]
+
+test_pls_age_VIP <- pls(age_only[, 23:ncol(age_only)], age_only[, 13],
+  scale = FALSE, center = TRUE, info = "Age Prediction Model",
+  cv = 1
+)
+
+# PLS for age with VIP > 0.5
+test_pls_age_VIP <- pls(age_only[, 23:ncol(age_only)], age_only[, 13],
+ scale = FALSE, center = TRUE, info = "Age Prediction Model",
+ cv = 1,exclcols = bad_waves
+)
+plot(test_pls_age_VIP)
+
+
+# 90/10 split for PLS, no VIP
+set.seed(1)
+idx <- floor(nrow(age_only) * 0.9)
+train_idx <- sample(seq_len(nrow(age_only)), size = idx)
+train <- age_only[train_idx, -c(1:12,14:33)] 
+test <- age_only[-train_idx, -c(1:12,14:33)] 
+
+test_pls_age_split <- pls(train[,-c(1)], train[,1],
+  scale = T, center = T,
+  info = "Length Prediction Model", cv = 1,
+  x.test = test[,-c(1)], y.test = test[,1]
+)
+plot(test_pls_age_split)
+
+# 90/10 split for PLS, VIP > 0.5
+test_pls_age_split_VIP <- pls(train[,-c(1)], train[,1],
+  scale = T, center = T,
+  info = "Length Prediction Model", cv = 1,
+  x.test = test[,-c(1)], y.test = test[,1],
+  exclcols = bad_waves
+)
+plot(test_pls_age_split_VIP)
+
+
+plot(test_pls_age)
+plot(test_pls_age_VIP)
+plot(test_pls_age_split)
+plot(test_pls_age_split_VIP)
+
+test_pls_age$res$cal$rmse[1]
+test_pls_age_VIP$res$cal$rmse[1]
+test_pls_age_split$res$cal$rmse[4]
+test_pls_age_split_VIP$res$cal$rmse[4]
+```
+
+# PCR for age
+
+```{r}
+pca_age_LPW <- pca(age_only[23:nrow(age_only)], scale = T)
+mlr_age_pcs <- pca_age_LPW$calres$scores[,1:20]
+mlr_age_df <- cbind(mlr_age_pcs[,1:10], age_only[,3:13])
+
+set.seed(1)
+idx <- floor(nrow(age_only) * 0.9)
+train_idx <- sample(seq_len(nrow(age_only)), size = idx)
+train <- age_only[train_idx, -c(1:12,14:33)] 
+test <- age_only[-train_idx, -c(1:12,14:33)] 
+
+library(pls)
+pcr_age_model <- pcr(read_age ~ .,
+                 data = train, 
+                 scale = T,
+                 validation = "CV",
+                 ncomp = 10)
+
+fit_age <- as.data.frame(pcr_age_model$fitted.values[,,3])
+fit_age <- fit_age %>% 
+  arrange(as.numeric(row.names(.)))
+names(fit_age)[1] <- "fit"
+ggplot() + geom_point(aes(x = fit_age$fit, y = train[,1])) + 
+  geom_abline(slope = 1, col = "red")
+
+pcr_age_pred <- predict(pcr_age_model, newdata=test, ncomp = 5)
+ggplot() + geom_point(aes(x = pcr_age_pred, y = test[,1])) + 
+  geom_abline(slope = 1, col = "red")
+
+rmsep_age_pcr <- as.data.frame(RMSEP(pcr_age_model))
+rmsep_age_pcr[7:10,7] # RMSEP for 3 & 4 comps
+```
 
