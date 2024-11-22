@@ -10,12 +10,12 @@ xml2
 hyperSpec
 prospectr
 data.table
+mdatools
 opusreader2
 splitstackshape
 viridisLite
 viridis
+pls
 remotes
 foreach
 simplerspec
-mdatools
-pls

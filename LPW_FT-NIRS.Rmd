@@ -1,7 +1,7 @@
 ---
 output:
-  pdf_document: default
   html_document: default
+  pdf_document: default
 editor_options:
   chunk_output_type: inline
 ---
@@ -16,7 +16,7 @@ This code borrowed from __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  Pac
 
 ```{r, results = 'hide', warning = F, message = F, cache = T}
 # Install packages not yet installed
-packages <- c("dplyr", "tidyr", "EMSC", "purrr", "devtools", "hyperSpec", "prospectr", "data.table", "mdatools", "opusreader2", "splitstackshape", "ggplot2", "viridis")
+packages <- c("dplyr", "tidyr", "EMSC", "purrr", "pls", "devtools", "hyperSpec", "prospectr", "data.table", "mdatools", "opusreader2", "splitstackshape", "ggplot2", "viridis")
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   utils::install.packages(pkgs = packages[!installed_packages])
@@ -206,12 +206,12 @@ ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number %in% c(2,3),]) + geom_path(aes(x
   scale_color_viridis(discrete = T)
 # These should be triplicate scans with identical values for each of the 122 specimens.  To confirm, I'll extract/plot the first 2 principal components for all FT-NIRS wavenumbers (indices 21:ncol(dfmeta_LPW)) and color points by run number.
 pca_all_LPW <- pca(dfmeta_LPW[21:nrow(dfmeta_LPW)], scale = T)
-dfmeta_LPW <- cbind(pc2 = pca_all_LPW$calres$scores[,2], dfmeta_LPW) # extract scores for PC2
-dfmeta_LPW <- cbind(pc1 = pca_all_LPW$calres$scores[,1], dfmeta_LPW) # extract scores for PC1
+pcs <- as.data.frame(cbind(pc2 = pca_all_LPW$calres$scores[,2], run_number = dfmeta_LPW$run_number)) # extract scores for PC2
+pcs <- cbind(pc1 = pca_all_LPW$calres$scores[,1], pcs) # extract scores for PC1
 
 # plot PC1 & PC2, colored by run_number
-ggplot(dfmeta_LPW) + 
-  geom_point(aes(x = pc1, y = pc2, color = run_number), size = 3) + 
+ggplot(pcs) + 
+  geom_point(aes(x = pc1, y = pc2, color = as.factor(run_number)), size = 3) + 
   labs(x = paste("PC1 (", 
                  round(pca_all_LPW$calres$expvar[1], digits = 4),
                  "% var. explaiend )"),
@@ -231,8 +231,8 @@ scan_2 <- dfmeta_LPW %>% dplyr::filter(run_number == 2)
 scan_3 <- dfmeta_LPW %>% dplyr::filter(run_number == 3)
 # scan_3_long <- pivot_longer(scan_3, cols = `11536`:`3952`, names_to = "name", values_to = "value")
 # scan_3_long$name <- as.numeric(scan_3_long$name)
-scan_avg <- bind_cols(NULL, scan_2[, 1:22])
-scan_avg <- bind_cols(scan_avg, (scan_2[, 23:ncol(scan_2)] + scan_3[, 23:ncol(scan_3)]) / 2)
+scan_avg <- bind_cols(NULL, scan_2[, 1:20])
+scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(scan_3)]) / 2)
 rm(scan_2, scan_3)
 scan_avg_long <- pivot_longer(scan_avg, cols = `11536`:`3952`, names_to = "name", values_to = "value")
 scan_avg_long$name <- as.numeric(scan_avg_long$name)
@@ -243,7 +243,7 @@ scan_avg_long$name <- as.numeric(scan_avg_long$name)
 Initial preprocessing done with prospectr and a savitzkygolay filter.  might make more sense to preprocess after selecting important variables?  Some functions included to play around with preprocessing filters and select optimal filters.
 
 ```{r, cache = T}
-spec.fig <- function(mydf, color) { # ggplot function to swap out color
+spec.fig <- function(mydf, color) { # ggplot function to plot spectra, colored by some factor
   ggplot(mydf) +
     geom_path(aes(x = name, y = value, color = {{ color }}, group = file_name)) +
     scale_x_reverse() +
@@ -262,114 +262,140 @@ spec.fig <- function(mydf, color) { # ggplot function to swap out color
       # axis.line = element_line(colour = "black")
     #)
 }
-sg_plotting <- function(color, m, p, w) {
+# function to plot results of different savitzkyGolay filter params
+sg_plotting <- function(color, m, p, w) { 
   dftempproc <- as.data.frame(
-    cbind(scan_avg[, c(1:22)],
-          savitzkyGolay(scan_avg[,23:length(scan_avg)],
+    cbind(scan_avg[, c(1:20)],
+          savitzkyGolay(scan_avg[,21:length(scan_avg)],
                         m = m, p = p, w = w)
   ))
-  dftempproc_long <- tidyr::pivot_longer(dftempproc, cols = c(23:length(dftempproc)))
+  dftempproc_long <- tidyr::pivot_longer(dftempproc, cols = c(21:length(dftempproc)))
   dftempproc_long$name <- as.numeric(as.character(dftempproc_long$name))
   spec.fig(mydf = dftempproc_long, color = {{ color }}) + 
     ggtitle(paste("diff = ", {{ m }}, "poly = ", {{ p}}, "window = ", {{ w }}))
 }
-
-sg_plotting(specimen,2,3,25)
-
+# function to apply savitzkyGolay filter with selected parameters to dataframe and create new temp_proc and temp_proc_long dataframes for modelling
 quickproc <- function(df, m, p, w){
   temp_proc <<- as.data.frame(
-    cbind({{df}}[, c(1:22)],
-          savitzkyGolay({{df}}[,23:length({{df}})],
+    cbind({{df}}[, c(1:20)],
+          savitzkyGolay({{df}}[,21:length({{df}})],
                         m = m, p = p, w = w)
   ))
-  temp_proc_long <<- tidyr::pivot_longer(temp_proc, cols = c(23:length(temp_proc)))
+  temp_proc_long <<- tidyr::pivot_longer(temp_proc, cols = c(21:length(temp_proc)))
   temp_proc_long$name <<- as.numeric(as.character(temp_proc_long$name))
 }
-
-quickproc(scan_avg,1,2,17)
-spec.fig(temp_proc_long,specimen)
-
-sg_plotting(length,1,2,17)
 ```
 
-# Variable/Wavelength Selection & PLS
+# Variable/Wavelength Selection & PLS on __length__ as a test
 Using temp_proc df produced from quickproc() function above.  VIP score to select wavelengths that are most informative to model
 ```{r, cache = T}
-# temp_proc df
-test_pls <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 4],
-  scale = FALSE, center = TRUE, info = "Length Prediction Model",
+quickproc(scan_avg,1,2,17) # SG of scan_avg DF to genereate temp_proc df for models below
+
+test_pls_length <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 2],
+  scale = T, center = F, info = "Length Prediction Model",
   cv = 1
 )
-plot(test_pls)
 
-# pls w/ VIP > 1.5
-test_vip <- vipscores(test_pls)
-plotVIPScores(test_pls)
-test_waves <- names(subset(test_vip[,1], test_vip[,1] > 1.5))
-all_waves <- names(temp_proc[,23:length(temp_proc)])
+# pls only with wavenumebrs VIP > 1
+length_VIP <- vipscores(test_pls_length) # extract VIP values for wavenumbers of above pls model
+plotVIPScores(test_pls_length)
+test_waves <- names(subset(length_VIP[,1], length_VIP[,1] > 1)) 
+all_waves <- names(temp_proc[,21:length(temp_proc)])
 bad_waves <- all_waves[!(all_waves %in% test_waves)]
-
-# unprocessed df
-test_unproc_pls <- pls(scan_avg[, 23:ncol(scan_avg)], scan_avg[, 4],
-  scale = FALSE, center = TRUE, info = "Length Prediction Model",
+test_pls_length_VIP <- pls(temp_proc[,21:ncol(temp_proc)], temp_proc[,2],
+  scale = T, center = F, info = "Length Prediction Model",
+  exclcols = bad_waves,
   cv = 1
 )
-plot(test_unproc_pls)
 
-# test_pls_VIP <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 4],
-#  scale = FALSE, center = TRUE, info = "Length Prediction Model",
-#  cv = 1,exclcols = bad_waves
-# )
-# plot(test_pls_VIP)
+# unprocessed df PLS
+test_pls_length_unproc <- pls(scan_avg[, 21:ncol(scan_avg)], scan_avg[, 2],
+  scale = T, center = F, info = "Length Prediction Model",
+  cv = 1
+)
 
-# 90% train, 10% test
-# set.seed(1)
-# idx <- floor(nrow(temp_proc) * 0.9)
-# train_idx <- sample(seq_len(nrow(temp_proc)), size = idx)
-# train <- temp_proc[train_idx, -c(1:3,5:33)] 
-# test <- temp_proc[-train_idx, -c(1:3,5:33)] 
-# ##
-# test_pls_split <- pls(train[,-c(1)], train[,1],
-#   scale = T, center = T,
-#   info = "Length Prediction Model", cv = 1,
-#   x.test = test[,-c(1)], y.test = test[,1]
-# )
-# plot(test_pls_split)
-# plot(test_pls_VIP)
-# plot(test_pls)
 
+# 90% train, 10% test PLS, no VIP
+set.seed(1)
+idx <- floor(nrow(temp_proc) * 0.9)
+train_idx <- sample(seq_len(nrow(temp_proc)), size = idx)
+train <- temp_proc[train_idx, -c(1,3:20)]
+test <- temp_proc[-train_idx, -c(1,3:20)]
+test_pls_length_split <- pls(train[,-c(1)], train[,1],
+  scale = T, center = F,
+  info = "Length Prediction Model", cv = 1,
+  x.test = test[,-c(1)], y.test = test[,1]
+)
+
+# 90% train, 10% test PLS, VIP
+test_pls_length_split_VIP <- pls(train[,-c(1)], train[,1],
+  scale = T, center = F,
+  info = "Length Prediction Model", cv = 1,
+  x.test = test[,-c(1)], y.test = test[,1],
+  exclcols = bad_waves
+)
+
+plot(test_pls_length)
+plot(test_pls_length_VIP)
+plot(test_pls_length_unproc)
+plot(test_pls_length_split)
+plot(test_pls_length_split_VIP)
+
+test_pls_length$res$cal$rmse[2]
+test_pls_length_VIP$res$cal$rmse[3]
+test_pls_length_unproc$res$cal$rmse[3]
+test_pls_length_split$res$test$rmse[2]
+test_pls_length_split_VIP$res$test$rmse[3]
 ```
 
-# MLR & PCA
+# MLR & PCA using length
 
 ```{r, cache = T}
-pca_avg_LPW <- pca(scan_avg[23:nrow(scan_avg)], scale = T)
-mlr_pcs <- pca_avg_LPW$calres$scores[,1:20]
-mlr_df <- cbind(mlr_pcs[,1:5], scan_avg[,1:4])
+pca_avg_LPW <- pca(scan_avg[21:nrow(scan_avg)], scale = T) # PCA for scan_avg
+plot(pca_avg_LPW)
+mlr_pcs <- pca_avg_LPW$calres$scores[, 1:20] # extract PCs
+mlr_pcs <- cbind(mlr_pcs[, 1:5], scan_avg[, 1:4]) # only store first 5 PC's
+mlr_length <- lm(data = mlr_pcs, length ~ `Comp 1` + `Comp 2` + `Comp 3` + `Comp 4` + `Comp 5`)
+summary(mlr_length) # only appear to need first 2 comps
+mlr_length <- update(mlr_length, length ~ `Comp 1` + `Comp 2`)
+summary(mlr_length)
 
-# split into test and train datasets
+# MLR with split
 set.seed(1)
-idx <- floor(nrow(scan_avg) * 0.9)
-train_idx <- sample(seq_len(nrow(scan_avg)), size = idx)
-train <- scan_avg[train_idx, -c(1:2,3,5:33)] 
-test <- scan_avg[-train_idx, -c(1:2,3,5:33)] 
+idx <- floor(nrow(scan_avg) * 0.9) # 90% of indices needed for training set
+train_idx <- sample(seq_len(nrow(scan_avg)), size = idx) # generate indices for training set
+train <- mlr_pcs[train_idx, -c(6,8:9)] # wavenumber measurement columns only
+test <- mlr_pcs[-train_idx, -c(6,8:9)]
+mlr_length_split <- lm(data = train, length ~ `Comp 1` + `Comp 2`)
+summary(mlr_length_split)
+mlr_length_split_pred <- predict(mlr_length_split,test)
+ggplot() +  # fitted values vs actual, out of sample prediction in red
+  geom_point(aes(train$length,mlr_length_split$fitted.values)) + 
+  geom_point(aes(test$length,mlr_length_split_pred),col = "red") + 
+  geom_abline(slope=1, intercept = 0, col = "red")
 
-library(pls)
-pcr_model <- pcr(length ~ .,
-                 data = train, 
-                 scale = T,
-                 validation = "CV",
-                 ncomp = 10)
+# Split for PCR
+set.seed(1)
+idx <- floor(nrow(scan_avg) * 0.9) # 90% of indices needed for training set
+train_idx <- sample(seq_len(nrow(scan_avg)), size = idx) # generate indices for training set
+train <- scan_avg[train_idx, -c(1, 3:20)] # length and wavenumber measurement columns only
+test <- scan_avg[-train_idx, -c(1, 3:20)]
 
-fit <- as.data.frame(pcr_model$fitted.values[,,3])
-fit <- fit %>% 
-  arrange(as.numeric(row.names(.)))
-names(fit)[1] <- "fit"
-ggplot() + geom_point(aes(x = fit$fit, y = train[,1])) + 
-  geom_abline(slope = 1, col = "red")
+# PCR model 
+pcr_length_model <- pls::pcr(length ~ .,
+  data = train,
+  scale = T,
+  validation = "CV",
+  ncomp = 10
+) # look at 10 components max
+selectNcomp(pcr_length_model, "onesigma", plot = TRUE) # determine appropriate number of comps
+scoreplot(pcr_length_model) # plot of first 2 PCs
+loadingplot(pcr_length_model)
 
-pcr_pred <- predict(pcr_model, newdata=test, ncomp = 3)
-ggplot() + geom_point(aes(x = pcr_pred, y = test[,1])) + 
+pcr_length_pred <- predict(pcr_length_model, newdata = test, ncomp = 2) # fit model to test data, store fitted values
+ggplot() +
+  geom_point(aes(x = train$length, y = pcr_length_model$fitted.values[, , 2])) + # extract fitted values of model with 2 PCs.
+  geom_point(aes(x = test$length, y = pcr_length_pred), col = "red") +
   geom_abline(slope = 1, col = "red")
 
 ```
@@ -377,100 +403,105 @@ ggplot() + geom_point(aes(x = pcr_pred, y = test[,1])) +
 
 ```{r, cache = T}
 # df with only aged specimens
-age_only <- scan_avg %>% dplyr::filter(is.na(read_age) == FALSE)
-
+age_only <- scan_avg[complete.cases(scan_avg$read_age),]
 # generate preprocessed df of ages, temp_proc & temp_proc_long
-quickproc(age_only,1,2,17)
-
-spec.fig(temp_proc_long,specimen)
-
+quickproc(age_only,2,3,19)
 # test pls, no variable selection
-test_pls_age <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 13],
-  scale = FALSE, center = TRUE, info = "Age Prediction Model",
+test_pls_age <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
+  scale = T, center = F, info = "Age Prediction Model",
   cv = 1
 )
-plot(test_pls_age)
 
-# pls with VIP > 0.5
+# pls with VIP > 1
 test_vip_age <- vipscores(test_pls_age)
 plotVIPScores(test_pls_age)
-test_waves <- names(subset(test_vip_age[,1], test_vip_age[,1] > .5))
-all_waves <- names(temp_proc[,23:length(temp_proc)])
-bad_waves <- all_waves[!(all_waves %in% test_waves)]
+good_waves <- as.numeric(names(subset(test_vip_age[,1], test_vip_age[,1] > 1)))
+all_waves <- names(temp_proc[,21:length(temp_proc)])
+bad_waves <- all_waves[!(all_waves %in% good_waves)]
 
-test_pls_age_VIP <- pls(temp_proc[, 23:ncol(temp_proc)], temp_proc[, 13],
- scale = FALSE, center = TRUE, info = "Age Prediction Model",
+test_pls_age_VIP <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
+ scale = T, center = F, info = "Age Prediction Model",
  cv = 1, exclcols = bad_waves
 )
-plot(test_pls_age_VIP)
-
 
 # 90/10 split for PLS, no VIP
 set.seed(1)
 idx <- floor(nrow(temp_proc) * 0.9)
 train_idx <- sample(seq_len(nrow(temp_proc)), size = idx)
-train <- temp_proc[train_idx, -c(1:12,14:22)] 
-test <- temp_proc[-train_idx, -c(1:12,14:22)] 
+train <- temp_proc[train_idx, -c(1:10,12:20)]
+test <- temp_proc[-train_idx, -c(1:10,12:20)]
 
 test_pls_age_split <- pls(train[,-1], train[,1],
-  scale = T, center = T,
+  scale = T, center = F,
   info = "Age Prediction Model", cv = 1,
   x.test = test[,-1], y.test = test[,1]
 )
-plot(test_pls_age_split)
 
-
-# 90/10 split for PLS, VIP > 0.5 (not working???)
+# 90/10 split for PLS, VIP > 1
 test_pls_age_split_VIP <- pls(train[,-1], train[,1],
-  scale = T, center = T,
+  scale = T, center = F,
   info = "Age Prediction Model", cv = 1,
+  x.test = test[,-c(1)], y.test = test[,1],
   exclcols = bad_waves
 )
-
 
 plot(test_pls_age)
 plot(test_pls_age_VIP)
 plot(test_pls_age_split)
 plot(test_pls_age_split_VIP)
 
-test_pls_age$res$cal$rmse[1]
-test_pls_age_VIP$res$cal$rmse[1]
-test_pls_age_split$res$cal$rmse[4]
-test_pls_age_split_VIP$res$cal$rmse[4]
+test_pls_age$res$cal$rmse[3]
+test_pls_age_VIP$res$cal$rmse[2]
+test_pls_age_split$res$test$rmse[3]
+test_pls_age_split_VIP$res$cal$rmse[2]
 ```
 
 # PCR for age
 
 ```{r, cache = T}
-pca_age_LPW <- pca(temp_proc[23:nrow(temp_proc)], scale = T)
+quickproc(age_only,2,3,19)
+pca_age_LPW <- pca(temp_proc[21:nrow(temp_proc)], scale = T)
+plot(pca_age_LPW)
 mlr_age_pcs <- pca_age_LPW$calres$scores[,1:20]
-mlr_age_df <- cbind(mlr_age_pcs[,1:10], temp_proc[,3:13])
+mlr_age_pcs <- cbind(mlr_age_pcs[,1:10], temp_proc[,1:11]) # extract first 10 PC's
+mlr_age <- lm(data = mlr_age_pcs, read_age ~ `Comp 1` + `Comp 2` + `Comp 3` + `Comp 4` + `Comp 5`)
+summary(mlr_age)
 
+# MLR with split
+set.seed(1)
+idx <- floor(nrow(age_only) * 0.9) # 90% of indices needed for training set
+train_idx <- sample(seq_len(nrow(age_only)), size = idx) # generate indices for training set
+train <- mlr_age_pcs[train_idx, -c(11:20)] # wavenumber measurement columns only
+test <- mlr_age_pcs[-train_idx, -c(11:20)]
+mlr_age_split <- lm(data = train, read_age ~`Comp 1` + `Comp 2` + `Comp 3` + `Comp 4` + `Comp 5`)
+summary(mlr_age_split)
+mlr_age_split_pred <- predict(mlr_age_split,test)
+ggplot() +  # fitted values vs actual, out of sample prediction in red
+  geom_point(aes(train$read_age,mlr_age_split$fitted.values)) + 
+  geom_point(aes(test$read_age,mlr_age_split_pred),col = "red") + 
+  geom_abline(slope=1, intercept = 0, col = "red")
+
+# Split for PCR
 set.seed(1)
 idx <- floor(nrow(temp_proc) * 0.9)
 train_idx <- sample(seq_len(nrow(temp_proc)), size = idx)
-train <- temp_proc[train_idx, -c(1:12,14:33)] 
-test <- temp_proc[-train_idx, -c(1:12,14:33)] 
+train <- age_only[train_idx, -c(1:10,12:20)] 
+test <- age_only[-train_idx, -c(1:10,12:20)] 
 
-library(pls)
 pcr_age_model <- pcr(read_age ~ .,
                  data = train, 
                  scale = T,
                  validation = "CV",
                  ncomp = 10)
+selectNcomp(pcr_age_model, "onesigma", plot = TRUE) # determine appropriate number of comps
+scoreplot(pcr_age_model) # plot of first 2 PCs
 
-fit_age <- as.data.frame(pcr_age_model$fitted.values[,,3])
-fit_age <- fit_age %>% 
-  arrange(as.numeric(row.names(.)))
-names(fit_age)[1] <- "fit"
-ggplot() + geom_point(aes(x = fit_age$fit, y = train[,1])) + 
+pcr_age_pred <- predict(pcr_age_model, newdata = test, ncomp = 4) # fit model to test data, store fitted values
+ggplot() +
+  geom_point(aes(x = train$read_age, y = pcr_age_model$fitted.values[, , 4])) + # extract fitted values of model with 2 PCs.
+  geom_point(aes(x = test$read_age, y = pcr_age_pred), col = "red") +
   geom_abline(slope = 1, col = "red")
 
-pcr_age_pred <- predict(pcr_age_model, newdata=test, ncomp = 5)
-ggplot() + geom_point(aes(x = pcr_age_pred, y = test[,1])) + 
-  geom_abline(slope = 1, col = "red")
+RMSEP(pcr_age_model)
 
-rmsep_age_pcr <- as.data.frame(RMSEP(pcr_age_model))
-rmsep_age_pcr[7:10,7] # RMSEP for 3 & 4 comps
 ```
-
