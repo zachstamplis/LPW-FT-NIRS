@@ -399,7 +399,7 @@ ggplot() +
   geom_abline(slope = 1, col = "red")
 
 ```
-# Remove specimens missing age data, pls for age
+# PLS for Age - Create age DF (remove specimens missing age data) 
 
 ```{r, cache = T}
 # df with only aged specimens
@@ -408,7 +408,7 @@ age_only <- scan_avg[complete.cases(scan_avg$read_age),]
 quickproc(age_only,2,3,19)
 # test pls, no variable selection
 test_pls_age <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
-  scale = T, center = F, info = "Age Prediction Model",
+  scale = F, center = T, info = "Age Prediction Model",
   cv = 1
 )
 
@@ -420,7 +420,7 @@ all_waves <- names(temp_proc[,21:length(temp_proc)])
 bad_waves <- all_waves[!(all_waves %in% good_waves)]
 
 test_pls_age_VIP <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
- scale = T, center = F, info = "Age Prediction Model",
+ scale = F, center = T, info = "Age Prediction Model",
  cv = 1, exclcols = bad_waves
 )
 
@@ -432,14 +432,14 @@ train <- temp_proc[train_idx, -c(1:10,12:20)]
 test <- temp_proc[-train_idx, -c(1:10,12:20)]
 
 test_pls_age_split <- pls(train[,-1], train[,1],
-  scale = T, center = F,
+  scale = F, center = T,
   info = "Age Prediction Model", cv = 1,
   x.test = test[,-1], y.test = test[,1]
 )
 
 # 90/10 split for PLS, VIP > 1
 test_pls_age_split_VIP <- pls(train[,-1], train[,1],
-  scale = T, center = F,
+  scale = F, center = T,
   info = "Age Prediction Model", cv = 1,
   x.test = test[,-c(1)], y.test = test[,1],
   exclcols = bad_waves
@@ -505,3 +505,10 @@ ggplot() +
 RMSEP(pcr_age_model)
 
 ```
+
+
+
+```{r}
+ggplot()hist(scan_avg$11536)
+```
+
