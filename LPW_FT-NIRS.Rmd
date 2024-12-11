@@ -494,19 +494,18 @@ r2.age$pls.test <- mean(r2.age$pls.test)
 # 
 # regcoeffs.getStats(coef(pls.mods[[5]]))
 
-pls.mods[[5]]$limParams
-dof <- as.vector(pls.mods[[5]]$limParams$T2$moments$Nu[1:20])
-summary(pls.mods[[5]]$coeffs)
-pls.mods[[5]]$calres$sep
-plotDistDoF(pls.mods[[5]])
-show(getRegcoeffs(pls.mods[[5]],2))
-
-
-my.pls2<-pls.ic(pls.mods[[5]]$calres$y.ref,pls.mods[[5]]$calres$y.pred,criterion="bic")
-X<-as.matrix(Boston[,-14])
-y<-as.vector(Boston[,14])
-
-dof <
+# pls.mods[[5]]$limParams
+# dof <- as.vector(pls.mods[[5]]$limParams$T2$moments$Nu[1:20])
+# summary(pls.mods[[5]]$coeffs)
+# pls.mods[[5]]$calres$sep
+# plotDistDoF(pls.mods[[5]])
+# show(getRegcoeffs(pls.mods[[5]],2))
+# 
+# 
+# my.pls2<-pls.ic(pls.mods[[5]]$calres$y.ref,pls.mods[[5]]$calres$y.pred,criterion="bic")
+# X<-as.matrix(Boston[,-14])
+# y<-as.vector(Boston[,14])
+# 
 
 mod.summary <- data.frame(
   model = c("lm_cal", "lm_test", "gam_cal", "gam_test", "pls_cal", "pls_test"),
