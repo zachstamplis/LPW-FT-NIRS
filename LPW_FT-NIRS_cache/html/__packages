@@ -2,6 +2,7 @@ dplyr
 tidyr
 EMSC
 purrr
+pls
 usethis
 devtools
 lattice
@@ -15,7 +16,10 @@ opusreader2
 splitstackshape
 viridisLite
 viridis
-pls
+nlme
+mgcv
+caret
+MuMIn
 remotes
 foreach
 simplerspec

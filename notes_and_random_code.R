@@ -472,20 +472,20 @@ par(mfrow=c(1,1))
 
 
 
-
+draw(GAM.mods[[5]],select=2, residuals = T)
 
 
 ggplot() +
   geom_point(data = test[[5]], aes(x = PC1, y = read_age), col = "red") + 
  # geom_smooth(method = "lm", data = test[[5]], aes(x = PC1, y = read_age), col = "red") + 
   geom_point(data = cal[[5]], aes(x = PC1, y = read_age), col = "black") +
-  geom_smooth(data = cal[[5]], aes(x = PC1, y = read_age), method = "gam") +
+  geom_smooth(data = cal[[5]], aes(x = PC1, y = read_age), method = "gam") #+
 
 ggplot() +
   geom_point(data = test[[5]], aes(x = PC2, y = read_age), col = "red") + 
   #geom_smooth(method = "lm", data = test[[5]], aes(x = PC2, y = read_age), col = "red") + 
   geom_point(data = cal[[5]], aes(x = PC2, y = read_age), col = "black") + 
-  geom_smooth(data = cal[[5]], aes(x = PC2, y = read_age), method = "gam") +
+  geom_smooth(data = cal[[5]], aes(x = PC2, y = read_age), method = "gam") #+
 
 ggplot() +
   geom_point(data = test[[5]], aes(x = PC3, y = read_age), col = "red") + 
@@ -499,3 +499,13 @@ ggplot() +
   geom_point(data = cal[[5]], aes(x = PC4, y = read_age), col = "black")+ 
   geom_smooth(data = cal[[5]], aes(x = PC4, y = read_age), method = "gam")
 
+
+
+
+
+draw(gam.select,residuals = T) & theme_stata() & 
+  theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18))
+
+
+appraise(gam.select) & theme_stata() & 
+  theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18))
