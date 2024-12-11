@@ -3,20 +3,21 @@ output:
   html_document: default
   pdf_document: default
 editor_options:
-  chunk_output_type: inline
+  chunk_output_type: console
 ---
-# LPW
+# FT-NIRS Otolith Age Prediction
 
 This RMD serves as a guide/lab journal to document my methods for processing and modelling FT-NIRS otolith spectra from juvenile Pacific cod (__Gadus macrocephalus__) in the Gulf of Alaska.  These scans were acquired on a Bruker MPA II with an integrating sphere, 5mm. teflon disk taped over the scanning window and gold transflectance stamp placed over the top of samples.  Spectra were collected between 11,500 and 4,000 cm^-1^ with a resolution of 16 cm^-1^ and 64 replicate scans.
 
 LPW Scans refer to specimens collected near Little Port Walter (LPW), a NOAA research station located near the southern tip of Baranof Island in Southeast Alaska.  Juvenile cod were collected using beach and purse seines from embayments near LPW on July 27-28, 2020. These fish were transferred into outdoor net pens at LPW to be reared in captivity.  Specimens were collected approximately weekly (ADD MORE IN HERE LATER)
 
-### Load necessary packages
-This code borrowed from __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  Packages used include _dplyr_ for easier data manipulation, _ggplot2_ for clear looking figures, _opusreader2_ to import FT-NIRS spectral data, _prospectr_ for FT-NIRS preprocessing (ADD MORE IN HERE)
+## Load packages, import .0 files, create spectral dataframe
+This segment is adapted from code provided by __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  __(ADD INFO ON PACKAGES INCLUDED?)__
 
+##### Load necessary packages
 ```{r, results = 'hide', warning = F, message = F, cache = T}
 # Install packages not yet installed
-packages <- c("dplyr", "tidyr", "EMSC", "purrr", "pls", "devtools", "hyperSpec", "prospectr", "data.table", "mdatools", "opusreader2", "splitstackshape", "ggplot2", "viridis")
+packages <- c("dplyr", "tidyr", "EMSC", "purrr", "pls", "devtools", "hyperSpec", "prospectr", "data.table", "mdatools", "opusreader2", "splitstackshape", "ggplot2", "viridis", "mgcv", "caret", "MuMIn")
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   utils::install.packages(pkgs = packages[!installed_packages])
@@ -33,96 +34,100 @@ if (!require("simplerspec")) {
   remotes::install_github("philipp-baumann/simplerspec")
   library("simplerspec")
 }
-# not sure if I need this one?
-# if (!require("hyperSpec.utils")) {
-#  remotes::install_github("konradmayer/hyperSpec.utils",dependencies=TRUE)
-#  library("hyperSpec.utils")
-# }
 
 rm(installed_packages) # remove objects from environment
 rm(packages)
 ```
 
+### Importing FT-NIRS Spectral Files (Opus .0) & Building Dataframe
 
+The Bruker MPA outputs FT-NIRS spectra in a .0 format.  Prior to loading spectral data, a metadata .csv (`LPW_metadata.csv`) was generated to pair specimens biological data with their respective FT-NIRS scans.   
+
+##### LPW Metadata Variables:
+
+- Specimen # in dataset (`specimen`)
+- Fish fork length (to nearest whole mm) (`length`)
+- Fish whole body weight (to nearest whole gram), may have been taken when partially frozen  (`weight`)
+- Weight of otolith (nearest 0.0001 gram) used for FT-NIRS scan (`structure_weight`)
+- otolith read age (`read_age`) in days representing an average of multiple reads (agreement <= 5%)
+- side of otolith scanned (`side`)
+- % of otolith with some sort of abnormality including crystalization or broken/chipped portions (`percent_affected`)
+- other problems include tissue stuck to otoliths (`other_problem`)
+- whether an otolith was broken or chipped at all (`broken`)
+- scan name/session or run number (`scan_name`, `run_number`) to indicate separate scans for the same specimen (LPW specimens scanned in triplicate)
+- Filename of .0 opus files for each specimen & scan session (`file_name`)
 
 ### Grabbing filenames from .0 files for metadata .csv
-The Bruker MPA outputs FT-NIRS spectra in a .0 format.  Prior to loading spectral data, a metadata .csv (__LPW_metadata.csv__) was created to pair specimen numbers, lengths & otolith weights with their respective FT-NIRS scans. Included in this metadata file is a column with each scans .0 filename.  
-
-All file names in a folder can be generated with list.files().  For pulling file names to create a new .csv, you can use:
-
-
+To facilitate easier .0 file loading, all file names for .0 files should be added to the metadata file.  All filenames in a folder can be generated with list.files().  For pulling file names to create a new .csv, you can use:
 ```{r, results = 'hide', cache = T, collapse = T, eval = F, include = F}
 cat(list.files(path = "LPW_scans/", ), "\n") # concatenates all filenames in a directory and adds a space delimiter
 ```
-This output (without index numbers in square brackets) can be copied and pasted into Excel, then converted into columns using the "Data -> Text to Columns" function and selecting a "space" delimiter.  These columns can then be transposed into a "filename" column.  
+This output (without index numbers in square brackets) can be copied and pasted into Excel, then converted into columns using the "Data -> Text to Columns" function and selecting a "space" delimiter.  These columns can then be transposed into a `file_name` column.  
 
 ### Reading in FT-NIRS spectra from a Bruker MPA II
-First read-in my metadata .csv and convert the session_title (i.e. scan #) to a factor.  LPW FT-NIRS scans were taken in triplicate (NIR_LPW202001202_otoliths, ...otoliths_rescan_1, ...otoliths_rescan_2) to see if spectra changed after storage.  Metadata for LPW contained an additional entry (..._rescan_3) with some notes and comments, however I will only be importing the metadata for actual scans.
+First I import my metadata (`LPW_metadata.csv`) and convert the `session_title` (i.e. scan #) to a factor.  LPW FT-NIRS scans were taken in triplicate (`NIR_LPW202001202_otoliths`, `...otoliths_rescan_1`, `...otoliths_rescan_2`) to see if spectra changed after storage.  Metadata for LPW contained an additional entry (`..._rescan_3`) with some notes and comments, however I will only be importing the metadata for actual scans.
 ```{r, cache = T}
-setwd("/Users/zachstamplis/Desktop/Thesis and Otoliths/Pcod/LPW/LPW_FT-NIRS")
-# source("LPW2020spectra.rmd", chdir = TRUE)
-meta_LPW <- read.csv("LPW_metadata.csv")
-names(meta_LPW)
+meta_LPW <- read.csv("LPW_metadata.csv") # import metadata
 levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to factor (three scans taken at separate times).
+meta_LPW <- meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2"), ] # only include scan sessions 1, 2 & 3
+meta_LPW$specimen[meta_LPW$file_name == ""] # check for missing file_names in metadata
 
-meta_LPW <- meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2"), ]
-
-meta_LPW <- meta_LPW[meta_LPW$file_name != "", ] # remove any rows that are missing a file_name in the metadata, suggesting no file exists.
-
-# make sure you have the same number of specimens for each scan session (122 specimens, 366 total scans)
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths"), ])
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_1"), ])
-nrow(meta_LPW[meta_LPW$session %in% c("NIR_LPW202001202_otoliths_rescan_2"), ])
 # the first scan of specimen 66 is missing and will be excluded for analysis.
+
+meta_LPW <- meta_LPW[meta_LPW$file_name != "", ] # remove any rows that are missing a file_name in the metadata
+
+# check number of specimens for each scan session (122 specimens, 365 total scans after excluding specimen 66, scan 1)
+nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths"), ])
+nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_1"), ])
+nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_2"), ])
 
 # generate file paths to import with Opusreader
 setwd("LPW_scans/") # setwd to folder containing FT-NIRS scans
-meta_LPW$file_path <- paste0(getwd(), "/", meta_LPW$file_name)
-Opusfiles <- as.vector(meta_LPW$file_path)
+meta_LPW$file_path <- paste0(getwd(), "/", meta_LPW$file_name) # generate filepaths for all .0 files
+Opusfiles <- as.vector(meta_LPW$file_path) # store filepaths in object
 exists <- as.vector(lapply(Opusfiles, file.exists)) # check that I have all my files or else I get an error when I read them in
-meta_LPW$exists <- exists
+meta_LPW$exists <- exists # add column to metadata dataframe to confirm file exists in directory 
 meta_LPW1 <- meta_LPW[meta_LPW$exists == "TRUE", ] # filter the file list and data by otoliths with spectra files
-Opusfiles <- as.vector(meta_LPW1$file_path) # I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
+Opusfiles <- as.vector(meta_LPW1$file_path) # from Esther, "I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error"
 rm(exists)
 rm(meta_LPW1)
 ```
-
-Once all metadata has been imported, .0 FT-NIRS scan files can be imported using opusreader2 and read_opus.  First a single file is read in to make sure everything looks good; then loading all .0 files with the Opusfiles object.  read_opus() creates a massive list of lists that includes information about MPA II settings, metadata generated during scans, specimen names, etc.  See ?read_opus() from the opusreader2 package for more details on the list structure of .0 files.
-
+Once all metadata has been imported into a dataframe with filepaths for .0 files, FT-NIRS scans can be imported using the  `opusreader2` package and `read_opus()`.  First a single file is read-in to make sure the script works and everything looks good; then all .0 files are imported using the `Opusfiles` object.  `read_opus()` creates a massive list of lists that includes information about MPA II settings, metadata generated during scans, specimen names, etc.  See `?read_opus()` from the `opusreader2` package for more details on the list structure of .0 files.
 ```{r, cache = T, warning=FALSE}
-# read a single file (one measurement) to check
+# read a single file (one measurement) to check that script runs without failure
 file <- Opusfiles[1]
 data_list <- opusreader2::read_opus(dsn = file) # NA's seem to be introduced due to a timestamp metadata issue, currently using suppressWarnings to hide the annoying output, but this is normal.
 rm(data_list)
 rm(file)
 SPCfiles_nooffset <- suppressWarnings(lapply(Opusfiles, opusreader2::read_opus)) # Read in all files in the Opusfiles list.  This gives an error if any file names or paths are wrong.
-
 # uncomment to see additional output from .0 files
 
 # str(SPCfiles_nooffset[[1]]) # check first element
 # SPCfiles_nooffset[[1]][[1]]$ab$data # can see spc values this way I think
 # SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters #this has info about what setting was used (here otolith), species, and file name
 SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FC2$parameter_value # species
-SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FD1$parameter_value # unique ID. Then paste with .0 to get full file name
+SPCfiles_nooffset[[1]][[1]]$lab_and_process_param_raw$parameters$FD1$parameter_value # unique ID, including project title (LPW2020), experimental designation (01 for experimental, mortalities are numbered 02), species code (202), specimen number (_1_) and scan number (OA1)
 # SPCfiles_nooffset[[1]][[1]]$ab$wavenumbers # wavenumbers scanned
 SPCfiles_nooffset[[1]][[1]]$instrument_ref$parameters$INS$parameter_value # instrument name
 ```
-Once loaded, FT-NIRS scan data can be extracted from the lists.  
+Once all .0 files with included metadata have been successfully read-in, FT-NIRS scan data can be extracted from the lists.
 ```{r, cache = T}
-spectra <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$data) # FT-NIRS scan data
-file_id <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FD1$parameter_value) # file ID in Opus
+# extract absorbance measurements, wavenumbers scanned, unique specimen ID, species  & instrument name from .0 files list
+spectra <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$data) # FT-NIRS scan data, absorbance measurements at all 949 wavenumbers
+wavenumber <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$wavenumbers) # list of all wavenumbers scanned
+file_id <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FD1$parameter_value) # unique ID in Opus
 species <- lapply(SPCfiles_nooffset, function(x) x$lab_and_process_param_raw$parameters$FC2$parameter_value) # species
-instrument <- lapply(SPCfiles_nooffset, function(x) x[[1]]$instrument_ref$parameters$INS$parameter_value) # instrument exists for all files, but
-wavenumber <- lapply(SPCfiles_nooffset, function(x) x[[1]]$ab$wavenumbers) # these could differ if settings changed or in light sources change
+instrument <- lapply(SPCfiles_nooffset, function(x) x[[1]]$instrument_ref$parameters$INS$parameter_value) # instrument name
+ # these could differ if settings changed or in light sources change
 
-spectra <- lapply(spectra, as.data.frame)
-# str(spectra[[1]])
-
+# create dataframe out of list
+spectra <- lapply(spectra, as.data.frame) 
+# add metadata to dataframe
 for (i in 1:length(spectra)) {
-  colnames(spectra[[i]]) <- wavenumber[[i]] # need to assign column  names first or else there will be an issue with subsequent names added
+  colnames(spectra[[i]]) <- wavenumber[[i]] # assign wavenumbers to columns of absorbance measurements
 }
 for (i in 1:length(spectra)) {
-  spectra[[i]]$species <- species[[i]]
+  spectra[[i]]$species <- species[[i]] 
 }
 for (i in 1:length(spectra)) {
   spectra[[i]]$file_id <- file_id[[i]]
@@ -134,30 +139,31 @@ for (i in 1:length(spectra)) {
   spectra[[i]]$file_path <- Opusfiles[[i]]
 }
 
-try <- spectra[[1]] # test code on one file
+# extract file_name from file_path: test code on one file to 
+try <- spectra[[1]] # specimen 1, scan session 1 
 splitstackshape::cSplit(as.data.frame(try$file_path), sep = "/", splitCols = "try$file_path", type.convert = FALSE) %>% select(tail(names(.), 1))
 rm(try)
-
+# create file_name variable for all scans
 file_name <- lapply(spectra, function(x) splitstackshape::cSplit(as.data.frame(x$file_path), sep = "/", splitCols = "x$file_path", type.convert = FALSE) %>% select(tail(names(.), 1)))
-file_name[[1]][[1, 1]]
+file_name[[1]][[1, 1]] # check that first element is correct
+# add file_name variable to spectra dataframe
 for (i in 1:length(spectra)) {
   spectra[[i]]$file_name <- file_name[[i]][[1, 1]]
 }
 rm(file_id, file_name, instrument, species, wavenumber, Opusfiles, i)
 ```
-# Building a spectral dataframe after importing .0 scans
+### Build final spectral dataframe for modelling and graphing
 ```{r, cache = T}
-df <- as.data.frame(do.call(rbind, spectra))
-dfmeta_LPW <- dplyr::left_join(meta_LPW, df, by = c("file_name", "file_path"))
-dfmeta_LPW <- dfmeta_LPW %>% select(-c("exists", "instrument"))
+df <- as.data.frame(do.call(rbind, spectra)) # convert spectral list/dataframe to dataframe object
+dfmeta_LPW <- dplyr::left_join(meta_LPW, df, by = c("file_name", "file_path")) # join metadata to spectral data
+dfmeta_LPW <- dfmeta_LPW %>% select(-c("exists", "instrument")) # remove exists and instrument columns
 rm(meta_LPW, df, spectra, SPCfiles_nooffset)
-colnames(dfmeta_LPW) <- as.character(colnames(dfmeta_LPW))
-dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # make long format, excluding all non-measurement columns
-dfmeta_longLPW <- dfmeta_longLPW %>% rename(., "wavenumber" = "name") # rename wavenumber column
-# fix class of measurements to a numeric
-dfmeta_longLPW$wavenumber <- as.numeric(as.character(dfmeta_longLPW$wavenumber))
+colnames(dfmeta_LPW) <- as.character(colnames(dfmeta_LPW)) # make sure column names are characters, not numeric
+dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # pivot absorbance measurements to long format for easy plotting
+dfmeta_longLPW <- dfmeta_longLPW %>% rename(., "wavenumber" = "name") # rename name column to wavenumber for clarification
+dfmeta_longLPW$wavenumber <- as.numeric(as.character(dfmeta_longLPW$wavenumber)) # change class of wavenumber variable to a numeric
 
-# Plot to see if data loaded properly.
+# Plot 7 specimens to see if data loaded properly.
 ggplot() +
   geom_path(data = dfmeta_longLPW[dfmeta_longLPW$specimen %in% c(1, 10, 100, 101, 102, 103, 104), ], 
             aes(x = wavenumber, y = value, color = session_title, group = file_name), linewidth = .5) +
@@ -177,35 +183,44 @@ ggplot() +
     axis.line = element_line(colour = "black")
   ) +
   facet_wrap(~specimen)
+
+# Save RDS for data transparency and easily enable others to work with dataframe without all these complicated import steps
+saveRDS(dfmeta_LPW, "RDS_dataframes/LPW_dfmeta.RDS")
+saveRDS(dfmeta_longLPW, "RDS_dataframes/LPW_dfmeta_long.RDS")
 ```
-# Comparison between scans & PCA of all scans
+# LPW Data Exploration
+Preliminary spectra and PCA plots were explored to see whether spectra of different scans were similar enough to warrant combining for analyses.  Previous research has shown FT-NIRS spectra can change quite a bit over time and the triplicate scans of LPW otoliths were collected over nearly a year between the first and third scans.
 ```{r, cache = T}
-# set run_number as factor for color groupings
+# set run_number as factor for color groupings in plots
 dfmeta_longLPW$run_number <- as.factor(dfmeta_longLPW$run_number)
 dfmeta_LPW$run_number <- as.factor(dfmeta_LPW$run_number)
-# FT-NIRS scans, all 3 runs, colored by run_number
+# Plot FT-NIRS scans, all 3 runs, colored by run_number
 ggplot(dfmeta_longLPW) + geom_path(aes(x = wavenumber, y = value, 
-                                       color = run_number, group = file_name, alpha = 0.5)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
-  theme(legend.position = "none") +
-  scale_color_viridis(discrete = T)
-# appears to be slightly different  values for each scan, look at 1 & 2 first
+                                       color = run_number, group = file_name),alpha = 0.5) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
+  scale_color_viridis(discrete = T) + 
+  scale_x_reverse() + # FT-NIRS spectra often displayed with reversed x-axis for otoliths - lower wavenumbers generally more informative and are more easily seen away from axes
+  ggtitle("LPW FT-NIRS Spectra, All Scan Sessions")
+# appear to be slightly different  values for each scan, look at 1 & 2 first
 ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number %in% c(1,2),]) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
-  theme(legend.position = "none") +
-  scale_color_viridis(discrete = T)
-# clearly different, now 1 & 3
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
+  scale_color_viridis(discrete = T) + 
+  scale_x_reverse() + 
+  ggtitle("LPW FT-NIRS Spectra, Scans 1 & 2")
+# Scans 1 & 3
 ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number %in% c(1,3),]) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
-  theme(legend.position = "none") +
-  scale_color_viridis(discrete = T)
-# also different, finally 2 & 3
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
+  scale_color_viridis(discrete = T) + 
+  scale_x_reverse() + 
+  ggtitle("LPW FT-NIRS Spectra, Scans 1 & 3")
+# Scans 2 & 3
 ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number %in% c(2,3),]) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1))) +
-  theme(legend.position = "none") +
-  scale_color_viridis(discrete = T)
-# These should be triplicate scans with identical values for each of the 122 specimens.  To confirm, I'll extract/plot the first 2 principal components for all FT-NIRS wavenumbers (indices 21:ncol(dfmeta_LPW)) and color points by run number.
-pca_all_LPW <- pca(dfmeta_LPW[21:nrow(dfmeta_LPW)], scale = T)
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
+  scale_color_viridis(discrete = T) + 
+  scale_x_reverse() + 
+  ggtitle("LPW FT-NIRS Spectra, Scans 2 & 3")
+# Scan 1 looks quite different than 2 & 3.  These should be triplicate scans with identical values for each of the 122 specimens.  To confirm, I extract/plot the first 2 principal components for all FT-NIRS wavenumbers (indices 21:ncol(dfmeta_LPW)) and color points by run number.
+pca_all_LPW <- pca(dfmeta_LPW[21:ncol(dfmeta_LPW)], scale = T)
 pcs <- as.data.frame(cbind(pc2 = pca_all_LPW$calres$scores[,2], run_number = dfmeta_LPW$run_number)) # extract scores for PC2
 pcs <- cbind(pc1 = pca_all_LPW$calres$scores[,1], pcs) # extract scores for PC1
 
@@ -213,17 +228,20 @@ pcs <- cbind(pc1 = pca_all_LPW$calres$scores[,1], pcs) # extract scores for PC1
 ggplot(pcs) + 
   geom_point(aes(x = pc1, y = pc2, color = as.factor(run_number)), size = 3) + 
   labs(x = paste("PC1 (", 
-                 round(pca_all_LPW$calres$expvar[1], digits = 4),
+                 round(pca_all_LPW$calres$expvar[1], digits = 3),# variance explained by PC1
                  "% var. explaiend )"),
        y = paste("PC2 (", 
-                 round(pca_all_LPW$calres$expvar[2], digits = 4),
-                 "% var. explaiend )")) +
+                 round(pca_all_LPW$calres$expvar[2], digits = 3), # variance explained by PC2
+                 "% var. explaiend )"),
+       color = "Run Number") +
   scale_color_viridis(discrete = T)
-# run/scan #1 looks way different.  Something appears to have changed between scan periods, however it is unknown exactly what occurred.  All future analysis will combine measurements from scans 2 & 3 and take an average.  
-
+# run/scan #1 confirmed to be quite different.  Something appears to have changed between scan periods, however it is unknown exactly what occurred.  All future analysis will combine absorbance measurements from scans 2 & 3 and average.  
+rm(pca_all_LPW,pcs)
 ```
 
-# Combining/averaging LPW FT-NRIS scans 2 & 3
+#### Combining/averaging LPW FT-NRIS scans 2 & 3
+
+
 ```{r, cache = T}
 scan_2 <- dfmeta_LPW %>% dplyr::filter(run_number == 2)
 # scan_2_long <- pivot_longer(scan_2, cols = `11536`:`3952`, names_to = "name", values_to = "value")
@@ -234,34 +252,57 @@ scan_3 <- dfmeta_LPW %>% dplyr::filter(run_number == 3)
 scan_avg <- bind_cols(NULL, scan_2[, 1:20])
 scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(scan_3)]) / 2)
 rm(scan_2, scan_3)
-scan_avg_long <- pivot_longer(scan_avg, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+
+# preprocess immediately right now
+scan_avg <- cbind(scan_avg[, c(1:20)], 
+                  savitzkyGolay(scan_avg[,21:length(scan_avg)],m = 1, p = 3, w = 17))
+scan_avg_long <- pivot_longer(scan_avg, cols = `11472`:`4016`, names_to = "name", values_to = "value")
 scan_avg_long$name <- as.numeric(scan_avg_long$name)
+
+
+
+
+
+#### Testing for now ####
+
+# removing the noisy stretch of spectra (>7500, up to 7504)
+scan_avg_filter <- scan_avg[,-c(21:517)]
+scan_avg_filter_long <- pivot_longer(scan_avg_filter, cols = `7496`:`4016`, names_to = "name", values_to = "value")
+scan_avg_filter_long$name <- as.numeric(scan_avg_filter_long$name)
+saveRDS(scan_avg, "RDS_dataframes/LPW_scan_avg.RDS")
+saveRDS(scan_avg_long, "RDS_dataframes/LPW_scan_avg_long.RDS")
+saveRDS(scan_avg_filter, "RDS_dataframes/LPW_scan_avg_filter.RDS")
+saveRDS(scan_avg_filter_long, "RDS_dataframes/LPW_scan_avg_filter_long.RDS")
 ```
 
+### Preprocessing Spectra
+Spectral preprocessing serves to remove unwanted noise from absorbance measurements, filter out NIR backscatter, and can  improve model fits by increasing variability of absorbance measurements at wavenumbers between specimens.  Initial preprocessing done with prospectr and a savitzkygolay filter.  Some functions are included to play around with preprocessing filters.  Will stick with one method and explore others later if time allows.
 
-# Preprocessing Spectra
-Initial preprocessing done with prospectr and a savitzkygolay filter.  might make more sense to preprocess after selecting important variables?  Some functions included to play around with preprocessing filters and select optimal filters.
-
+#### Functions
 ```{r, cache = T}
-spec.fig <- function(mydf, color) { # ggplot function to plot spectra, colored by some factor
+# ggplot function to plot spectra, colored by some factor
+spec.fig <- function(mydf, color) { 
+  #color <- as.character({{color}})
   ggplot(mydf) +
-    geom_path(aes(x = name, y = value, color = {{ color }}, group = file_name)) +
-    scale_x_reverse() +
-    scale_color_viridis() + 
-    labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1)))
-    #theme(axis.text = element_text(size = 16),
-      # axis.text.x = element_text(size = 12, angle = 25),
-      # axis.title = element_text(size = 14),
-      # legend.position = "right",
-      # strip.text = element_text(size = 14),
-      # legend.text = element_text(size = 14),
-      # legend.title = element_text(size = 14),
-      # panel.grid.major = element_blank(),
-      # panel.grid.minor = element_blank(),
-      # panel.background = element_blank(),
-      # axis.line = element_line(colour = "black")
-    #)
+  geom_path(aes(x = name, y = value, color = {{ color }}, group = file_name)) +
+  scale_x_reverse() +
+  scale_color_viridis() + 
+  labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1)))
+  #theme(axis.text = element_text(size = 16),
+    # axis.text.x = element_text(size = 12, angle = 25),
+    # axis.title = element_text(size = 14),
+    # legend.position = "right",
+    # strip.text = element_text(size = 14),
+    # legend.text = element_text(size = 14),
+    # legend.title = element_text(size = 14),
+    # panel.grid.major = element_blank(),
+    # panel.grid.minor = element_blank(),
+    # panel.background = element_blank(),
+    # axis.line = element_line(colour = "black")
+  #)
 }
+spec.fig(scan_avg_long,length)
+
 # function to plot results of different savitzkyGolay filter params
 sg_plotting <- function(color, m, p, w) { 
   dftempproc <- as.data.frame(
@@ -274,6 +315,9 @@ sg_plotting <- function(color, m, p, w) {
   spec.fig(mydf = dftempproc_long, color = {{ color }}) + 
     ggtitle(paste("diff = ", {{ m }}, "poly = ", {{ p}}, "window = ", {{ w }}))
 }
+sg_plotting(specimen,1,3,17)
+sg_plotting(specimen,1,2,17)
+
 # function to apply savitzkyGolay filter with selected parameters to dataframe and create new temp_proc and temp_proc_long dataframes for modelling
 quickproc <- function(df, m, p, w){
   temp_proc <<- as.data.frame(
@@ -288,13 +332,15 @@ quickproc <- function(df, m, p, w){
 
 # Variable/Wavelength Selection & PLS on __length__ as a test
 Using temp_proc df produced from quickproc() function above.  VIP score to select wavelengths that are most informative to model
+
 ```{r, cache = T}
-quickproc(scan_avg,1,2,17) # SG of scan_avg DF to genereate temp_proc df for models below
+quickproc(scan_avg,1,3,17) # SG of scan_avg DF to genereate temp_proc df for models below
 
 test_pls_length <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 2],
   scale = T, center = F, info = "Length Prediction Model",
   cv = 1
 )
+saveRDS(test_pls_length, "RDS_dataframes/PLS_Length")
 
 # pls only with wavenumebrs VIP > 1
 length_VIP <- vipscores(test_pls_length) # extract VIP values for wavenumbers of above pls model
@@ -307,13 +353,14 @@ test_pls_length_VIP <- pls(temp_proc[,21:ncol(temp_proc)], temp_proc[,2],
   exclcols = bad_waves,
   cv = 1
 )
+saveRDS(test_pls_length_VIP, "RDS_dataframes/PLS_Length_VIP")
 
 # unprocessed df PLS
 test_pls_length_unproc <- pls(scan_avg[, 21:ncol(scan_avg)], scan_avg[, 2],
   scale = T, center = F, info = "Length Prediction Model",
   cv = 1
 )
-
+saveRDS(test_pls_length_unproc, "RDS_dataframes/PLS_Length_unproc")
 
 # 90% train, 10% test PLS, no VIP
 set.seed(1)
@@ -326,6 +373,7 @@ test_pls_length_split <- pls(train[,-c(1)], train[,1],
   info = "Length Prediction Model", cv = 1,
   x.test = test[,-c(1)], y.test = test[,1]
 )
+saveRDS(test_pls_length_split, "RDS_dataframes/PLS_Length_split")
 
 # 90% train, 10% test PLS, VIP
 test_pls_length_split_VIP <- pls(train[,-c(1)], train[,1],
@@ -334,6 +382,7 @@ test_pls_length_split_VIP <- pls(train[,-c(1)], train[,1],
   x.test = test[,-c(1)], y.test = test[,1],
   exclcols = bad_waves
 )
+saveRDS(test_pls_length_split_VIP, "RDS_dataframes/PLS_Length_split_VIP")
 
 plot(test_pls_length)
 plot(test_pls_length_VIP)
@@ -346,32 +395,104 @@ test_pls_length_VIP$res$cal$rmse[3]
 test_pls_length_unproc$res$cal$rmse[3]
 test_pls_length_split$res$test$rmse[2]
 test_pls_length_split_VIP$res$test$rmse[3]
+
+rm(test_pls_length, test_pls_length_VIP, test_pls_length_unproc, test_pls_length_split, test_pls_length_split_VIP)
+rm(test,train,length_VIP, all_waves, bad_waves, idx, test_waves, train_idx)
 ```
 
-# MLR & PCA using length
+# PCR & PC GAMs using length
 
 ```{r, cache = T}
-pca_avg_LPW <- pca(scan_avg[21:nrow(scan_avg)], scale = T) # PCA for scan_avg
-plot(pca_avg_LPW)
-mlr_pcs <- pca_avg_LPW$calres$scores[, 1:20] # extract PCs
-mlr_pcs <- cbind(mlr_pcs[, 1:5], scan_avg[, 1:4]) # only store first 5 PC's
-mlr_length <- lm(data = mlr_pcs, length ~ `Comp 1` + `Comp 2` + `Comp 3` + `Comp 4` + `Comp 5`)
-summary(mlr_length) # only appear to need first 2 comps
-mlr_length <- update(mlr_length, length ~ `Comp 1` + `Comp 2`)
-summary(mlr_length)
+# extract PC's
+pca_LPW <- pca(scan_avg[21:ncol(scan_avg)], scale = T) # PCA for scan_avg
+plot(pca_LPW)
+pca_LPW <- pca_LPW$calres$scores[, 1:20] # extract PCs
+pca_LPW <- cbind(pca_LPW[, 1:10], scan_avg[, 1:20]) # only store first 10 PC's
+colnames(pca_LPW)[c(1:10)] <- c("PC1", "PC2", "PC3", "PC4", "PC5","PC6", "PC7", "PC8", "PC9", "PC10")
 
-# MLR with split
+# PCR
+PCR_length <- lm(data = pca_LPW, length ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
+summary(PCR_length) # some PC's seem less informative than others
+PCR_length2 <- update(PCR_length, length ~ PC1 + PC2 + PC5 + PC6 + PC8 + PC10)
+summary(PCR_length2)
+plot(PCR_length)
+plot(PCR_length2)
+
+
+PCR_length3 <- pcr(length ~ ., data = scan_avg[,c(2,21:ncol(scan_avg))], ncomp = 20,
+                   validation = "CV")
+selectNcomp(PCR_length3, "onesigma", plot = TRUE) # determine appropriate number of comps, suggested 4
+scoreplot(PCR_length3) # plot of first 2 PCs
+
+
+PCR_length3$fitted.values[,,4]
+
+
 set.seed(1)
-idx <- floor(nrow(scan_avg) * 0.9) # 90% of indices needed for training set
-train_idx <- sample(seq_len(nrow(scan_avg)), size = idx) # generate indices for training set
-train <- mlr_pcs[train_idx, -c(6,8:9)] # wavenumber measurement columns only
-test <- mlr_pcs[-train_idx, -c(6,8:9)]
-mlr_length_split <- lm(data = train, length ~ `Comp 1` + `Comp 2`)
-summary(mlr_length_split)
-mlr_length_split_pred <- predict(mlr_length_split,test)
+inTraining <- createDataPartition(scan_avg$length, p = .9, list = F)
+training <- scan_avg[inTraining,-c(1,3:20)]
+testing  <- scan_avg[-inTraining,-c(1,3:20)]
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10,
+                           preProcOptions = list(pcaComp = 10))
+PCR_length4 <- train(length ~ ., data = training, 
+                 method = "lm", 
+                 trControl = fitControl,
+                 preProcess = "pca")
+PCR_length4$
+scan_avg[inTraining,-c(1,3:20)]
+
+pca <- prcomp(scan_avg[inTraining,-c(1:20)],center=F,scale=T)
+pca$rotation
+pca$sdev
+pca_LPW$PC1
+dim(pca_LPW1$x)
+pca_LPW1$loadings
+testing1 <- preProcess(scan_avg[inTraining,-c(1:20)], method = "pca", pcaComp = 10)
+predict(testing1, scan_avg[inTraining,-c(1,3:ncol(scan_a))])
+
+
+postResampleSpectro(predict(PCR_length4,testing),testing$length)
+PCR_length4
+pcr1
+PCR_length4$finalModel
+
+
+
+
+
+
+# PCR with 10-fold split for RMSE
+set.seed(1)
+splits <- caret::createFolds(pca_LPW$length, k = 10, list = TRUE, returnTrain = FALSE)
+PCR_errors <- vector()
+# GAM
+for(i in 1:10){
+  mod <- lm(data = pca_LPW[-splits[[i]],], length ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
+  preds <- predict(mod, newdata = pca_LPW[splits[[i]],])
+  PCR_errors[i] <- RMSE(pca_LPW[splits[[i]],]$length, preds)
+}
+# RMSE
+mean(PCR_errors)
+
+# PCR with only significant PC's from lm() summary
+for(i in 1:10){
+  mod <- lm(data = pca_LPW[-splits[[i]],], length ~ PC1 + PC2 + PC5 + PC6 + PC8 + PC10)
+  preds <- predict(mod, newdata = pca_LPW[splits[[i]],])
+  PCR_errors2[i] <- RMSE(pca_LPW[splits[[i]],]$length, preds)
+}
+#RMSE
+mean(PCR_errors2)
+
+# choosing the best PC's for length results in lowest RMSE
+
+pred <- predict(PCR_length2,pca_LPW[splits[[1]],])
 ggplot() +  # fitted values vs actual, out of sample prediction in red
-  geom_point(aes(train$length,mlr_length_split$fitted.values)) + 
-  geom_point(aes(test$length,mlr_length_split_pred),col = "red") + 
+  geom_point(aes(pca_LPW[splits[[1]],]$length,PCR_length2$fitted.values)) + 
+  geom_point(aes(test$length,PCR_length_split_pred),col = "red") + 
   geom_abline(slope=1, intercept = 0, col = "red")
 
 # Split for PCR
@@ -399,37 +520,36 @@ ggplot() +
   geom_abline(slope = 1, col = "red")
 
 ```
-# PLS for Age - Create age DF (remove specimens missing age data) 
+# PLS for Age
 
 ```{r, cache = T}
 # df with only aged specimens
 age_only <- scan_avg[complete.cases(scan_avg$read_age),]
-# generate preprocessed df of ages, temp_proc & temp_proc_long
-quickproc(age_only,2,3,19)
+
 # test pls, no variable selection
-test_pls_age <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
+test_pls_age <- pls(age_only[, 21:ncol(age_only)], age_only[, 11],
   scale = F, center = T, info = "Age Prediction Model",
   cv = 1
 )
-
+plot(test_pls_age)
 # pls with VIP > 1
 test_vip_age <- vipscores(test_pls_age)
 plotVIPScores(test_pls_age)
 good_waves <- as.numeric(names(subset(test_vip_age[,1], test_vip_age[,1] > 1)))
-all_waves <- names(temp_proc[,21:length(temp_proc)])
+all_waves <- names(age_only[,21:length(age_only)])
 bad_waves <- all_waves[!(all_waves %in% good_waves)]
 
-test_pls_age_VIP <- pls(temp_proc[, 21:ncol(temp_proc)], temp_proc[, 11],
+test_pls_age_VIP <- pls(age_only[, 21:ncol(age_only)], age_only[, 11],
  scale = F, center = T, info = "Age Prediction Model",
  cv = 1, exclcols = bad_waves
 )
 
 # 90/10 split for PLS, no VIP
 set.seed(1)
-idx <- floor(nrow(temp_proc) * 0.9)
-train_idx <- sample(seq_len(nrow(temp_proc)), size = idx)
-train <- temp_proc[train_idx, -c(1:10,12:20)]
-test <- temp_proc[-train_idx, -c(1:10,12:20)]
+idx <- floor(nrow(age_only) * 0.9)
+train_idx <- sample(seq_len(nrow(age_only)), size = idx)
+train <- age_only[train_idx, -c(1:10,12:20)]
+test <- age_only[-train_idx, -c(1:10,12:20)]
 
 test_pls_age_split <- pls(train[,-1], train[,1],
   scale = F, center = T,
@@ -459,11 +579,11 @@ test_pls_age_split_VIP$res$cal$rmse[2]
 # PCR for age
 
 ```{r, cache = T}
-quickproc(age_only,2,3,19)
-pca_age_LPW <- pca(temp_proc[21:nrow(temp_proc)], scale = T)
+quickproc(age_only,1,3,17)
+pca_age_LPW <- pca(temp_proc[21:ncol(temp_proc)], scale = T)
 plot(pca_age_LPW)
-mlr_age_pcs <- pca_age_LPW$calres$scores[,1:20]
-mlr_age_pcs <- cbind(mlr_age_pcs[,1:10], temp_proc[,1:11]) # extract first 10 PC's
+mlr_age_pcs <- pca_age_LPW$calres$scores[,1:10]
+mlr_age_pcs <- cbind(mlr_age_pcs, temp_proc[,1:11])
 mlr_age <- lm(data = mlr_age_pcs, read_age ~ `Comp 1` + `Comp 2` + `Comp 3` + `Comp 4` + `Comp 5`)
 summary(mlr_age)
 
@@ -504,11 +624,542 @@ ggplot() +
 
 RMSEP(pcr_age_model)
 
+
+```
+
+# Read in old dataframes 
+
+```{r}
+dfmeta_LPW <- readRDS("RDS_dataframes/LPW_dfmeta.RDS")
+dfmeta_longLPW <- readRDS("RDS_dataframes/LPW_dfmeta_long.RDS")
+scan_avg <- readRDS("RDS_dataframes/LPW_scan_avg.RDS")
+scan_avg_long <- readRDS("RDS_dataframes/LPW_scan_avg_long.RDS")
+test_pls_length <- readRDS("RDS_dataframes/PLS_Length")
+scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_filter.RDS")
+test_pls_length_VIP <- readRDS("RDS_dataframes/PLS_Length_VIP")
+test_pls_length_unproc <- readRDS("RDS_dataframes/PLS_Length_unproc")
+test_pls_length_split <- readRDS("RDS_dataframes/PLS_Length_split")
+test_pls_length_split_VIP <- readRDS("RDS_dataframes/PLS_Length_split_VIP")
+```
+
+# Modelling with ages
+
+```{r}
+# potential outliers: 53(age 175), 52(age 135)
+# other junk ages maybe (148 (44 in spectrascores), 147)
+age_only <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ]
+# age_only_original <- age_only
+age_only <- age_only %>%
+  dplyr::filter(read_age != 175, read_age != 135, read_age != 146, specimen != 65, read_age != 147, read_age != 181, read_age != 161, read_age != 188)
+# scan_avg_filter_long <- pivot_longer(scan_avg, cols = `7496`:`4016`, names_to = "name", values_to = "value")
+# scan_avg_filter_long$name <- as.numeric(scan_avg_filter_long$name)
+# age_only_long <- scan_avg_filter_long[complete.cases(scan_avg_filter_long$read_age),]
+# age_only_long <- age_only_long %>% dplyr::filter(read_age != 175 & read_age != 135 & read_age != 146 & specimen != 65)
+#
+# ggplot(age_only_long) +
+#   geom_path(aes(x = name, y = value, color = read_age, group = as.factor(file_name))) +
+#   scale_x_reverse() +
+#   scale_color_viridis() +
+#   labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1)))
+
+
+# 10 fold CV split - create folds
+set.seed(6)
+splits <- caret::createFolds(age_only$read_age, k = 10, list = TRUE, returnTrain = FALSE)
+
+test <- age_only[-splits[[1]], ]
+
+# running into an interesting problem where my split cannot get more PC's than the number of samples.....limit to 5 right now I guess?
+
+
+
+# extract PC's for each calibration set, create test sets with ages and spectra
+cal <- list()
+test <- list()
+for (i in 1:10) {
+  # calibration set and PC's
+  pc.mod <- preProcess(age_only[-splits[[i]], -c(1:20)], method = "pca", thresh = 0.95, pcaComp = 4)
+  pc.cal <- predict(pc.mod, age_only[-splits[[i]], -c(1:20)])
+  pc.cal <- cbind(pc.cal, age_only[-splits[[i]], ])
+  cal[[i]] <- pc.cal
+  # test sets
+  pc.test <- predict(pc.mod, age_only[splits[[i]], -c(1:20)])
+  pc.test <- cbind(pc.test, age_only[splits[[i]], ])
+  test[[i]] <- pc.test
+}
+
+# store metrics from each fold and each model type
+RMSE.age <- list()
+r2.age <- list()
+AIC.age <- list()
+AICc.age <- list()
+
+# determine which PC's to include via step & AIC selection
+mod.sel <- list()
+for (i in 1:10) {
+  pctest <- cal[[i]]
+  temp <- step(lm(data = pctest[-splits[[i]], ], read_age ~ PC1 + PC2 + PC3 + PC4))
+  mod.sel[[i]] <- rownames(summary(temp)$coef)
+}
+table(unlist(mod.sel))
+
+# PC 2 seems uninformative, will leave out and include all others for now
+
+lm.mods <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- lm(data = calibrate, read_age ~ PC1 + PC3 + PC4)
+  RMSE.age$lm.cal[i] <- caret::RMSE(pred = mod$fitted.values, obs = calibrate[, 15])
+  preds <- predict(mod, newdata = testing)
+  RMSE.age$lm.test[i] <- caret::RMSE(pred = preds, obs = testing[, 15])
+  r2.age$lm.cal[i] <- summary(mod)$r.squared
+  RSS <- sum((testing$read_age - preds)^2)
+  TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+  r2.age$lm.test[i] <- 1 - (RSS / TSS)
+  AIC.age$lm[i] <- AIC(mod)
+  AICc.age$lm[i] <- AICc(mod)
+  lm.mods[[i]] <- mod
+}
+
+RMSE.age$lm.cal <- mean(RMSE.age$lm.cal)
+RMSE.age$lm.test <- mean(RMSE.age$lm.test)
+r2.age$lm.cal <- mean(r2.age$lm.cal)
+r2.age$lm.test <- mean(r2.age$lm.test)
+
+
+GAM.mods <- list()
+# GAM with 10 fold split
+
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- gam(data = calibrate, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4), method = "ML", select = T)
+  # Extract AIC, AICc, RMSE (cal & test) & r2 (cal & test)
+  RMSE.age$GAM.cal[i] <- caret::RMSE(pred = mod$fitted.values, obs = calibrate[, 15])
+  preds <- predict(mod, newdata = testing)
+  RMSE.age$GAM.test[i] <- caret::RMSE(pred = preds, obs = testing[, 15])
+  r2.age$gam.cal[i] <- summary(mod)$r.sq
+  RSS <- sum((testing$read_age - preds)^2)
+  TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+  r2.age$gam.test[i] <- 1 - (RSS / TSS)
+  AIC.age$gam[i] <- AIC(mod)
+  AICc.age$gam[i] <- AICc(mod)
+  GAM.mods[[i]] <- mod
+}
+r2.age$gam.cal <- mean(r2.age$gam.cal)
+r2.age$gam.test <- mean(r2.age$gam.test)
+RMSE.age$GAM.cal <- mean(RMSE.age$GAM.cal)
+RMSE.age$GAM.test <- mean(RMSE.age$GAM.test)
+
+##### PLS COMPARISON
+
+pls.mods <- list()
+# test pls, no variable selection
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- pls(calibrate[, 25:ncol(pctest)], calibrate[, 15],
+    scale = F, center = T,
+    info = "Age Prediction Model", cv = 1,
+    x.test = testing[, 25:ncol(pctest)], y.test = testing[, 15]
+  )
+  RMSE.age$pls.cal[i] <- mod$calres$rmse[[3]]
+  RMSE.age$pls.test[i] <- mod$testres$rmse[[3]]
+  r2.age$pls.cal[i] <- mod$calres$r2[[3]]
+  r2.age$pls.test[i] <- mod$testres$r2[[3]]
+  # RSS <- sum((mod$calres$y.ref - mod$calres$y.pred[,3,])^2)
+  # n <- length(mod$calres$y.ref)
+  # AIC.age$pls[i] <- n * log(RSS/n) + (2 * mod$ncomp.selected)
+  pls.mods[[i]] <- mod
+}
+RMSE.age$pls.cal <- mean(RMSE.age$pls.cal)
+RMSE.age$pls.test <- mean(RMSE.age$pls.test)
+r2.age$pls.cal <- mean(r2.age$pls.cal)
+r2.age$pls.test <- mean(r2.age$pls.test)
+
+# temp <- list()
+# for(i in 1:10){
+# temp[[i]] <- pls.mods[[i]]$ncomp.selected
+# }
+# table(unlist(temp))
+
+mod.summary <- data.frame(
+  model = c("lm_cal", "lm_test", "gam_cal", "gam_test", "pls_cal", "pls_test"),
+  r2 = 1:6,
+  RMSE = 1:6
+)
+mod.summary$r2 <- unlist(r2.age)
+mod.summary$RMSE <- unlist(RMSE.age)
+
+# AIC.age$lm <- mean(AIC.age$lm)
+# AIC.age$gam <- mean(AIC.age$gam)
+# AIC.age$pls <- mean(AIC.age$pls)
+AIC.summary <- data.frame(
+  model = c(rep("lm", 10), rep("gam", 10)),
+  AIC = 1:20,
+  AICc = 1:20
+)
+# AIC.age <- AIC.age[-3]
+AIC.summary$AIC <- unlist(AIC.age)
+AIC.summary$AICc <- unlist(AICc.age)
+
+```
+
+
+```{r}
+# model evaluation
+# USEFUL PACKAGES!!!!
+
+# visreg, gratia, gridExtra, gglm, 
+
+
+visreg(lm.mods[[5]],"PC1",  scale="response")
+visreg(lm.mods[[5]],"PC1")
+length(residuals(lm.mods[[5]]))
+length(residuals(GAM.mods[[5]]))
+
+
+draw(GAM.mods[[5]],residuals = T) & theme_stata() & 
+  theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18))
+
+
+appraise(GAM.mods[[5]]) & theme_stata() & 
+  theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18))
+
+gglm(lm.mods[[5]], theme = theme_stata(), theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18)) )
+     
+#     ) + theme_stata() + #
+  
+plot(lm.mods[[5]])
+
+plot5 <- ggplot(data = lm.mods[[5]]) +
+  #stat_fitted_resid(alpha = 1) +  
+  #stat_normal_qq(alpha = 1) + 
+  #stat_scale_location() + 
+  stat_cooks_obs() + 
+  theme(plot.title = element_text(size = 22), axis.title = element_text(size = 20),axis.text = element_text(size = 18)) 
+plot5
+library(gridExtra)
+
+# grid.arrange(plot1,plot2,
+#              plot3,plot4)
+
+
+
+par(mfrow=c(2,2))
+gam.check(GAM.mods[[5]])
+visreg(GAM.mods[[5]], "PC1")
+
+par(mfrow=c(1,1))
+qq.gam(GAM.mods[[5]])
+
+visreg(GAM.mods[[5]], "PC1",  scale="response")
+
+ggsave(
+  "/Users/zachstamplis/Desktop/Thesis and Otoliths/Project Plots/Diagnostics_GAM.png",
+  plot = last_plot(),
+  width = 1920,
+  height = 1080,
+  units = "px",
+  dpi = 300,
+)
+
+
+
+
+plot
+
+visreg(lm.mods[[5]])
+
+summary(GAM.mods[[1]])
+plot(GAM.mods[[1]])
+qq.gam(GAM.mods[[1]])
+plot(GAM.mods[[1]])
+hist(resid(GAM.mods[[1]]))
+
+resid(GAM.mods[[1]])
 ```
 
 
 
+
+## Plots for project
+
+
+
 ```{r}
-ggplot()hist(scan_avg$11536)
+# corrplots to show what the data look like and show how highly correlated they are
+
+library(corrplot)
+temp <- as.data.frame(matrix(nrow = 10, ncol = 50))
+for (i in 1:50) {
+  temp[, i] <- rnorm(10)
+}
+# corrplot::corrplot(cor(age_only[,100:150]), tl.cex = 0.1)
+corrplot::corrplot(cor(age_only[, 100:150]), tl.pos = "n", method = "color", cl.cex = 2)
+# corrplot::corrplot(cor(temp), tl.cex = 0.1)
+corrplot::corrplot(cor(temp), tl.cex = 0.1, , tl.pos = "n", method = "color", cl.cex = 2)
+
+# show the FT-NIRS data
+library(ggthemes)
+scan_avg_filter_long <- pivot_longer(scan_avg, cols = `7496`:`4016`, names_to = "name", values_to = "value")
+scan_avg_filter_long$name <- as.numeric(scan_avg_filter_long$name)
+age_only_long <- scan_avg_filter_long[complete.cases(scan_avg_filter_long$read_age), ]
+age_only_long <- age_only_long %>% dplyr:::filter(read_age != 175, read_age != 135, read_age != 146, specimen != 65, read_age != 147, read_age != 181, read_age != 161, read_age != 188)
+
+# single specimen scan
+
+plot1 <- age_only_long %>%
+  dplyr::filter(specimen == 2) %>%
+  ggplot() +
+  theme_stata() +
+  geom_path(aes(x = name, y = value, group = as.factor(file_name)),, size = 2) +
+  scale_x_reverse() +
+  labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme(
+    axis.title = element_text(size = 25),
+    axis.text = element_text(size = 20)
+  )
+plot1
+
+# 20 specimen scans
+
+plot2 <- age_only_long %>%
+  dplyr::filter(specimen %in% c(1:20)) %>%
+  ggplot() +
+  geom_path(aes(x = name, y = value, color = specimen, group = as.factor(file_name)), size = 2) +
+  scale_x_reverse() +
+  labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme_stata() + 
+  theme(
+    axis.title = element_text(size = 25),
+    axis.text = element_text(size = 20),
+    legend.position = "none"
+  )
+plot2
+
+# all specimens with ages (excluding outliers)
+
+plot3 <- ggplot(age_only_long) +
+  geom_path(aes(x = name, y = value, color = read_age, group = as.factor(file_name)), size = 1.1) +
+  scale_x_reverse() +
+  scale_color_viridis(option = "viridis") +
+  labs(y = "Preprocessed absorbance", x = expression(paste("Wavenumber ", cm^-1))) +
+  theme_stata() +
+  theme(
+    axis.title = element_text(size = 25),
+    axis.text = element_text(size = 20),
+    legend.position = c(0.39, 0.66)
+  ) +
+  labs(colour = "Age (days)")
+
+plot3 + theme(legend.text = element_text(size = 25, vjust = .2),
+    legend.title = element_text(size = 30, vjust = 1)) + 
+  guides(color = guide_colorbar(barheight = 9, barwidth = 2.5))
+
+# plots of model performance
+
+actual <- list()
+pred_lm <- list()
+pred_gam <- list()
+
+# create dataframe with predictions vs actual age
+for(i in 1:10){
+  actual[[i]] <- test[[i]]$read_age
+  pred_lm[[i]] <- predict(lm.mods[[i]],test[[i]])
+  pred_gam[[i]] <- predict(GAM.mods[[i]],test[[i]])
+}
+predictions <- data.frame(actual = rep(0,53),
+                          pred_lm = rep(0,53),
+                          pred_gam = rep(0,53))
+predictions$actual <- unlist(actual)
+predictions$pred_lm <- unlist(pred_lm)
+predictions$pred_gam <- unlist(pred_gam)
+rm(actual, pred_lm,pred_gam)
+
+ggplot(data = predictions) + 
+  geom_point(aes(x = actual, y = pred_lm), color = "red") + 
+  geom_point(aes(x = actual, y = pred_gam), color = "blue") + 
+  geom_abline(slope = 1) + 
+  xlab("Age (days)") + 
+  ylab("Predicted age (days)")
+
+# LM model performance
+
+r2lmlab <- expression(paste(r^2, " = ", 0.7836))
+rmselmlab <- paste("RMSE = ", round(RMSE.age$lm.test,3))
+
+plot4 <- ggplot() + 
+  theme_stata() + 
+  geom_point(data = predictions,aes(x = actual, y = pred_lm), color = "red", size = 8) +
+  geom_abline(slope = 1, size = 2.5) + 
+  xlab("Age (days)") + 
+  ylab("Predicted age (days)") +
+  geom_text(aes(x = 183, y = 130), size = 13,label = r2lmlab) +
+  geom_text(aes(x = 180, y = 124), size = 13, label = rmselmlab) + 
+  theme(axis.title = element_text(size = 30),
+    axis.text = element_text(size = 25))
+plot4 
+
+
+# GAM model performance
+
+r2gamlab <- expression(paste(r^2, " = ", 0.7886))
+rmsegamlab <- paste("RMSE = ", round(RMSE.age$GAM.test,3))
+
+plot5 <- ggplot() + 
+    theme_stata() + 
+  geom_point(data = predictions,aes(x = actual, y = pred_gam), color = "blue", size = 8) +
+  geom_abline(slope = 1, size = 2.5) + 
+  xlab("Age (days)") + 
+  ylab("Predicted age (days)") +
+  geom_text(aes(x = 183, y = 125),size = 13,label = r2gamlab) +
+  geom_text(aes(x = 180, y = 119),size = 13,label = rmsegamlab) + 
+  theme(axis.title = element_text(size = 30),
+    axis.text = element_text(size = 25))
+plot5
+
+
+```
+
+
+
+
+# Some shenanigans
+
+```{r}
+pca_LPW <- pca(scan_avg_filter[,31:ncol(scan_avg_filter)], scale = F, center = T)
+plot(pca_LPW)
+plotVariance(pca_LPW$res$cal, type = "h", show.labels = TRUE, labels = "values")
+# MDAtools PCA match prcomp output
+pca_LPW$calres$scores[,1]
+scan_avg_filter[,1]
+
+data(simdata)
+Xc = simdata$spectra.c
+Xt = simdata$spectra.t
+m = pca(Xc, 7, x.test = Xt)
+
+PCA_res <- list()
+PCA_test <- list()
+for (i in 1:10) {
+  Xc = scan_avg_filter[-splits[[i]], 31:ncol(scan_avg_filter)]
+  Xt = scan_avg_filter[splits[[i]], 31:ncol(scan_avg_filter)]
+  test_pca <- pca(Xc, scale = F, center = T, x.test = Xt)
+  PCA_res[[i]] <- test_pca$calres$scores[,1:5]
+  PCA_test[[i]] <- test_pca$testres$scores[,1:5]
+}
+
+# pca and pcares
+lm(data=scan_avg_filter, length ~ )
+
+
+plot(testing)
+testing$testres
+
+# PCR 
+set.seed(1)
+inTraining <- createDataPartition(scan_avg_filter$length, p = .9, list = F)
+training <- scan_avg_filter[inTraining,-c(11,13:30)]
+testing  <- scan_avg_filter[-inTraining,-c(11,13:30)]
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10)
+pcr1 <- train(length ~ ., data = training, 
+                 method = "pcr", 
+                 trControl = fitControl)
+pcr1$results
+# RMSE for predictions
+RMSE(predict(pcr1,testing),testing$length)
+pcr1
+
+
+# PLS
+set.seed(1)
+inTraining <- createDataPartition(scan_avg$length, p = .9, list = F)
+training <- scan_avg[inTraining,-c(1,3:20)]
+testing  <- scan_avg[-inTraining,-c(1,3:20)]
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10)
+pls1 <- train(length ~ ., data = training,
+              method = "widekernelpls",
+              trControl = fitControl,
+             )
+pls1
+postResampleSpectro(predict(pls1,testing),testing$length)
+
+
+# PLS
+set.seed(1)
+inTraining <- createDataPartition(scan_avg$length, p = .9, list = F)
+training <- scan_avg[inTraining,-c(1,3:20)]
+testing  <- scan_avg[-inTraining,-c(1,3:20)]
+fitControl <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10)
+pls2 <- train(x = scan_avg[,21:ncol(scan_avg)],
+              y = scan_avg$length,
+              method = "pls", 
+              tuneLength = 6)
+pls2
+postResampleSpectro(predict(pls2,testing),testing$length)
+
+
+##### NOW WITH MY DOGSHIT AGES ###### 
+
+# 10 fold CV split, GAMS for age with RMSE
+set.seed(1)
+splits <- caret::createFolds(mlr_age_pcs$length, k = 10, list = TRUE, returnTrain = FALSE)
+gam_errors <- vector()
+mean(gam_errors)
+# GAM
+for(i in 1:10){
+  mod <- gam(data = pca_LPW[-splits[[i]],], length ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5), method="REML", select = T)
+  preds <- predict(length_gam, newdata = pca_LPW[splits[[i]],])
+  gam_errors[i] <- RMSE(pca_LPW[splits[[i]],]$length, preds)
+}
+#RMSE
+mean(gam_errors)
+
+
+
+
+
+PCR_length_split_pred <- predict(PCR_length_split,test)
+ggplot() +  # fitted values vs actual, out of sample prediction in red
+  geom_point(aes(train$length,PCR_length_split$fitted.values)) + 
+  geom_point(aes(test$length,PCR_length_split_pred),col = "red") + 
+  geom_abline(slope=1, intercept = 0, col = "red")
+
+
+
+
+
+
+
+pca_LPW <- pca(scan_avg_rem[21:ncol(scan_avg)], scale = T) # PCA for scan_avg
+plot(pca_LPW)
+pca_LPW <- pca_LPW$calres$scores[, 1:20] # extract PCs
+pca_LPW <- cbind(pca_LPW[, 1:5], scan_avg[, 1:4]) # only store first 5 PC's
+colnames(pca_LPW)[c(1:5)] <- c("PC1", "PC2", "PC3", "PC4", "PC5")
+PCR_length <- lm(data = pca_LPW, length ~ PC1 + PC2 + PC3 + PC4 + PC5)
+summary(PCR_length) # only appear to need first 2 comps
+PCR_length <- update(PCR_length, length ~ PC1 + PC2)
+summary(PCR_length)
+
+
+test <- AIC.summary %>% group_by(model) %>% summarise(meanAIC = mean(AIC),
+                                              meanAICc = mean(AICc))
+test
+
+
 ```
 
