@@ -1,5 +1,0 @@
-This RMD looks at the impacts of scaling & centering spectra on PLS model results.  
-```{r}
-age_only
-```
-

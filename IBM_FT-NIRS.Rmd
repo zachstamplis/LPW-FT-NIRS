@@ -1,0 +1,225 @@
+# Similar to LPW - read in spectra
+```{r}
+setwd("../")
+ibm_meta<-read.csv("IBM_metadata.csv", header = TRUE)
+names(ibm_meta)
+levels(as.factor(as.character(ibm_meta$session_title)))
+ibm_meta<-ibm_meta[ibm_meta$file_name !="",]
+#I set my directory to where i saved the spectra
+setwd("IBM_scans")
+ibm_meta$file_path<-paste0(getwd(),"/",ibm_meta$file_name)
+Opusfiles<-as.vector(ibm_meta$file_path)
+exists<-as.vector(lapply(Opusfiles, file.exists))
+ibm_meta$exists<-exists
+meta1<-ibm_meta[ibm_meta$exists=="TRUE",] #filter the file list and data by otoliths with spectra files
+Opusfiles<-as.vector(meta1$file_path) #I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
+rm(exists)
+rm(meta1)
+```
+# Read in spectra files
+# Note that if you have a file open in OPUS, you can't open the same file in R
+```{r, include=FALSE,results='hide',message=FALSE,warning=FALSE}
+
+file <- Opusfiles[1]
+data_list <- read_opus(dsn = file)
+rm(data_list)
+rm(file)
+SPCfiles_nooffset<-lapply(Opusfiles,read_opus) #this gives an error if any file names or paths are wrong
+spectra<-lapply(SPCfiles_nooffset, function (x) x[[1]]$ab$data)
+species<-lapply(SPCfiles_nooffset,function (x) x$lab_and_process_param_raw$parameters$FC2$parameter_value)
+file_id<-lapply(SPCfiles_nooffset,function (x) x$lab_and_process_param_raw$parameters$FD1$parameter_value)
+instrument<-lapply(SPCfiles_nooffset,function (x) x[[1]]$instrument_ref$parameters$INS$parameter_value) #instrument exists for all files, but 
+wavenumber<-lapply(SPCfiles_nooffset,function (x) x[[1]]$ab$wavenumbers)#these could differ if settings changed or in light sources change
+spectra<-lapply(spectra,as.data.frame)
+for (i in 1:length(spectra)){
+  colnames(spectra[[i]])<-wavenumber[[i]] #need to assign column  names first or else there will be an issue with subsequent names added
+}
+for (i in 1:length(spectra)){
+  spectra[[i]]$species<-species[[i]]
+}
+for (i in 1:length(spectra)){
+  spectra[[i]]$file_id<-file_id[[i]]
+}
+for (i in 1:length(spectra)){
+  spectra[[i]]$instrument<-instrument[[i]]
+}
+for (i in 1:length(spectra)){
+  spectra[[i]]$file_path<-Opusfiles[[i]]
+}
+#I need to get the file names from the long list
+file_name<-lapply(spectra, function (x) splitstackshape::cSplit(as.data.frame(x$file_path),sep="/",splitCols="x$file_path",type.convert=FALSE)%>%select(tail(names(.), 1)))
+for (i in 1:length(spectra)){
+  spectra[[i]]$file_name<-file_name[[i]][[1,1]]
+}
+```
+Make a spectra dataframe
+```{r, include=FALSE,results='hide',message=FALSE,warning=FALSE}`{r}
+df <- as.data.frame(do.call(rbind,spectra))
+dfmeta_IBM<-dplyr::left_join(ibm_meta,df,by=c("file_name","file_path"))#note that instrument names are different in the metadata file vs. OPUS files. 
+dfmeta_IBM<-dfmeta_IBM%>%dplyr::select(.,-c(exists, instrument))
+rm(ibm_meta, df, wavenumber, spectra, instrument, species, SPCfiles_nooffset,file_id)
+
+colnames(dfmeta_IBM)<-as.character(colnames(dfmeta_IBM))
+
+dfmeta_IBM_long<-tidyr::pivot_longer(dfmeta_IBM, cols= -c(1:24)) #make it long format to plot it
+dfmeta_IBM_long<-dfmeta_IBM_long%>%rename(.,"wavenumber"="name")
+dfmeta_IBM_long$wavenumber<-as.numeric(as.character(dfmeta_IBM_long$wavenumber))
+dfmeta_IBM_long$specimen <- as.factor(dfmeta_IBM_long$specimen)
+dfmeta_IBM_long$run_number <- as.factor(dfmeta_IBM_long$run_number)
+
+#check a plot
+ggplot()+
+  geom_path(data=dfmeta_IBM_long[dfmeta_IBM_long$specimen %in% c(423801,423812,423818,423902, 423904,423914,423918), ] ,aes(x=wavenumber,y=value,group=file_name),linewidth=.5)+ 
+  scale_x_reverse()+
+  labs(y="Absorbance units",x= expression(paste("Wavenumber ", cm^-1)))+
+  theme(axis.text =element_text(size=10),
+        axis.title=element_text(size=12),
+        strip.text = element_text(size=14),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  facet_wrap(~specimen)
+saveRDS(dfmeta_IBM, "RDS_dataframes/IBM_dfmeta.RDS")
+```
+# Look at spectra
+```{r}
+ggplot(dfmeta_IBM_long[dfmeta_IBM_long$run_number %in% c(1,2),]) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
+  scale_color_viridis(discrete = T) + 
+  scale_x_reverse() + 
+  ggtitle("LPW FT-NIRS Spectra, Scans 1 & 2")
+# scan 1 and 2 look WAY different, only use scan 2
+```
+# Preprocess
+```{r}
+# preprocess immediately right now
+dfmeta_IBM_proc <- cbind(dfmeta_IBM[, c(1:24)],prospectr::savitzkyGolay(dfmeta_IBM[,25:ncol(dfmeta_IBM)],m = 1, p = 3, w = 17))
+dfmeta_IBM_proc_long <- pivot_longer(dfmeta_IBM_proc, cols = `11472`:`4016`, names_to = "name", values_to = "value")
+dfmeta_IBM_proc_long$name <- as.numeric(dfmeta_IBM_proc_long$name)
+
+# UNPROCESSED
+ggplot(dfmeta_IBM_long[dfmeta_IBM_long$run_number == 2,]) + geom_path(aes(x = wavenumber, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+# SAVITZKY
+ggplot(dfmeta_IBM_proc_long[dfmeta_IBM_proc_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+# really noisy looking beginning section...!
+
+testing1 <- prep.snv(as.matrix(dfmeta_IBM[,25:ncol(dfmeta_IBM)]))
+testing1 <- as.data.frame(unlist(testing1))
+testing1 <- cbind(dfmeta_IBM[,1:24], testing1)
+testing1_long <- pivot_longer(testing1, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+testing1_long$name <- as.numeric(testing1_long$name)
+# SNV NORMALIZATION
+ggplot(testing1_long[testing1_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+testing2 <- cbind(testing1[, c(1:24)],prospectr::savitzkyGolay(testing1[,25:ncol(testing1)],m = 1, p = 3, w = 17))
+testing2_long <- pivot_longer(testing2, cols = `11472`:`4016`, names_to = "name", values_to = "value")
+testing2_long$name <- as.numeric(testing2_long$name)
+# SAVITZKY AFTER SNV
+ggplot(testing2_long[testing2_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+testing3 <- dfmeta_IBM[,-c(25:529)]
+testing3 <- cbind(testing3[, c(1:24)],prospectr::savitzkyGolay(testing3[,25:ncol(testing3)],m = 1, p = 3, w = 17))
+testing3_long <- pivot_longer(testing3, cols = `7432`:`4016`, names_to = "name", values_to = "value")
+testing3_long$name <- as.numeric(testing3_long$name)
+# remove > 7500 first, then SAVITZKY
+ggplot(testing3_long[testing3_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+
+testing4 <- testing2[,-c(25:521)]
+testing4_long <- pivot_longer(testing4, cols = `7496`:`4016`, names_to = "name", values_to = "value")
+testing4_long$name <- as.numeric(testing4_long$name)
+# <7500 for SNV -> SAVITZKY
+ggplot(testing4_long[testing4_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+```
+# NORMALIZE THEN SG FILTER
+```{r}
+test1 <- prep.snv(as.matrix(dfmeta_LPW[,21:ncol(dfmeta_LPW)]))
+test1 <- as.data.frame(unlist(test1))
+test1 <- cbind(dfmeta_LPW[,1:20], test1)
+test1_long <- pivot_longer(test1, cols = `11536`:`3952`, names_to = "name", values_to = "value")
+test1_long$name <- as.numeric(test1_long$name)
+# snv
+ggplot(test1_long[test1_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+test2 <- cbind(test1[, c(1:20)],savitzkyGolay(test1[,21:length(test1)],m = 1, p = 3, w = 17))
+test2_long <- pivot_longer(test2, cols = `11472`:`4016`, names_to = "name", values_to = "value")
+test2_long$name <- as.numeric(test2_long$name)
+# snv -> SAVITZKY
+ggplot(test2_long[test2_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+test3 <- test2[,-c(21:517)]
+test3_long <- pivot_longer(test3, cols = `7496`:`4016`, names_to = "name", values_to = "value")
+test3_long$name <- as.numeric(test3_long$name)
+# remove >7500 from snv -> savitzky
+ggplot(test3_long[test3_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse() + geom_path(data = testing4_long[testing4_long$run_number == 2,], aes(x = name, y = value, color = length, group = file_name))
+
+
+scan_avg <- cbind(scan_avg[, c(1:20)],savitzkyGolay(scan_avg[,21:length(scan_avg)],m = 1, p = 3, w = 17))
+scan_avg_long <- pivot_longer(scan_avg, cols = `11472`:`4016`, names_to = "name", values_to = "value")
+scan_avg_long$name <- as.numeric(scan_avg_long$name)
+
+
+
+
+
+ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number == 2,]) + geom_path(aes(x = wavenumber, y = value, color = length, group = file_name)) + 
+  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
+  scale_color_viridis() + 
+  scale_x_reverse()
+
+```
+
+# extract specimen numbers from rescans
+```{r}
+testing1 <- cat(strings, "\n") # concatenates all filenames in a directory and adds a space delimiter
+
+
+
+list.files(path = "IBM_scans")
+
+
+
+strings <- list.files(path = "get_filename", )
+library(stringr)
+# Define the pattern to match
+pattern <- "(?<=JJ202101202_)\\d+(?=_.+)"
+# Use str_extract_all to extract matches from each string
+matches <- str_extract_all(strings, pattern)
+testing <- unlist(matches)
+# Convert the matches to a data frame for easier inspection
+df <- data.frame(numbers = unlist(matches))
+print(df)
+testing
+```
+
