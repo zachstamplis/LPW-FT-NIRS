@@ -1,11 +1,12 @@
 ---
-title: FT-NIRS Otolith Age Prediction
+title: FT-NIRS Otolith Age Prediction - LPW
 output: 
   html_document:
     theme: simplex
     toc: yes
     toc_float:
       collapsed: true
+runtime: shiny
 ---
 This RMD serves as a guide/lab journal to document my methods for processing and modelling FT-NIRS otolith spectra from juvenile Pacific cod (_Gadus macrocephalus_) in the Gulf of Alaska.  These scans were acquired on a Bruker MPA II with an integrating sphere, 5mm. teflon disk taped over the scanning window and gold transflectance stamp placed over the top of samples.  Spectra were collected between 11,500 and 4,000 cm^-1^ with a resolution of 16 cm^-1^ and 64 replicate scans.
 
@@ -16,7 +17,7 @@ LPW Scans refer to specimens collected near Little Port Walter (LPW), a NOAA res
 This segment is adapted from code provided by __Dr. Esther Goldstein__ at NOAA's AFSC in Seattle.  __(ADD INFO ON PACKAGES INCLUDED?)__
 ```{r, results = 'hide', warning = F, message = F, cache = T}
 # Install packages not yet installed
-packages <- c("caret", "corrplot", "devtools", "dplyr", "gglm", "ggplot2", "gratia", "gridExtra", "knitr", "lubridate", "mdatools", "mgcv", "MuMIn", "opusreader2", "prospectr", "splitstackshape", "tidyr", "viridis")
+packages <- c("caret", "corrplot", "devtools", "dplyr", "gglm", "ggplot2", "gratia", "gridExtra", "knitr", "lubridate", "mdatools", "mgcv", "MuMIn", "opusreader2", "prospectr", "splitstackshape","shiny", "tidyr", "viridis")
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   utils::install.packages(pkgs = packages[!installed_packages])
@@ -51,11 +52,9 @@ Some notes on metadata variables
 - scan name/session or run number (`scan_name`, `run_number`) to indicate separate scans for the same specimen (LPW specimens scanned in triplicate)
 - Filename of .0 opus files for each specimen & scan session (`file_name`)
 
-## Importing FT-NIRS Spectra
+# Importing FT-NIRS Spectra
 
 The Bruker MPA outputs FT-NIRS spectra in a .0 format.  Prior to loading spectral data, a metadata .csv (`LPW_metadata.csv`) was generated to pair specimens biological data with their respective FT-NIRS scans.   
-
-#### Filenames
 
 To facilitate easier .0 file loading, all file names for .0 files should be added to the metadata file.  All filenames in a folder can be generated with list.files().  For pulling file names to create a new .csv, you can use:
 ```{r, results = 'hide', cache = T, collapse = T, eval = F, include = F}
@@ -64,12 +63,12 @@ To facilitate easier .0 file loading, all file names for .0 files should be adde
 
 This output (without index numbers in square brackets) can be copied and pasted into Excel, then converted into columns using the "Data -> Text to Columns" function and selecting a "space" delimiter.  These columns can then be transposed into a `file_name` column.  
 
-## Opus FT-NIRS files
+### Metadata
 
 First I import my metadata (`LPW_metadata.csv`) and convert the `session_title` (i.e. scan #) to a factor.  LPW FT-NIRS scans were taken in triplicate (`NIR_LPW202001202_otoliths`, `...otoliths_rescan_1`, `...otoliths_rescan_2`) to see if spectra changed after storage.  Metadata for LPW contained an additional entry (`..._rescan_3`) with some notes and comments, however I will only be importing the metadata for actual scans.
 ```{r, cache = T}
 # 66 missing from first 2 scans, 3 & 4 have it though (removed from dataset for now, may incorporate back in)
-meta_LPW <- read.csv("LPW_metadata.csv") # import metadata
+meta_LPW <- read.csv("metadata/LPW_metadata.csv") # import metadata
 levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to factor (three scans taken at separate times).
 meta_LPW <- meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2", "NIR_LPW202001202_otoliths_rescan_3"), ]
 meta_LPW$specimen[meta_LPW$file_name == ""] # check for missing file_names in metadata
@@ -81,7 +80,7 @@ nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_2"
 nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_3"), ])
 meta_LPW$sample_date <- lubridate::as_date(mdy(meta_LPW$sample_date)) # convert sample date to lubridate format
 # generate file paths to import with Opusreader
-meta_LPW$file_path <- paste0(getwd(), "/", "/LPW_scans/", meta_LPW$file_name) # generate filepaths for all .0 files
+meta_LPW$file_path <- paste0(getwd(), "/FT-NIRS_spectra/LPW_scans/", meta_LPW$file_name) # generate filepaths for all .0 files
 Opusfiles <- as.vector(meta_LPW$file_path) # store filepaths in object
 exists <- as.vector(lapply(Opusfiles, file.exists)) # check that I have all my files or else I get an error when I read them in
 meta_LPW$exists <- exists # add column to metadata dataframe to confirm file exists in directory
@@ -90,6 +89,8 @@ Opusfiles <- as.vector(meta_LPW1$file_path) # from Esther, "I repeated this and 
 rm(exists)
 rm(meta_LPW1)
 ```
+
+### Opus files
 
 Once all metadata has been imported into a dataframe with filepaths for .0 files, FT-NIRS scans can be imported using the  `opusreader2` package and `read_opus()`.  First a single file is read-in to make sure the script works and everything looks good; then all .0 files are imported using the `Opusfiles` object.  `read_opus()` creates a massive list of lists that includes information about MPA II settings, metadata generated during scans, specimen names, etc.  See `?read_opus()` from the `opusreader2` package for more details on the list structure of .0 files.
 ```{r warning=FALSE, cache=TRUE}
@@ -151,7 +152,7 @@ for (i in 1:length(spectra)) {
 rm(file_id, file_name, instrument, species, wavenumber, Opusfiles, i, SPCfiles_nooffset)
 ```
 
-## Build final spectral dataframe for modelling and graphing
+### Combine dataframes
 ```{r, cache = T}
 df <- as.data.frame(do.call(rbind, spectra)) # convert spectral list/dataframe to dataframe object
 dfmeta_LPW <- dplyr::left_join(meta_LPW, df, by = c("file_name", "file_path")) # join metadata to spectral data
@@ -164,6 +165,11 @@ dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # pivot absorbance m
 dfmeta_longLPW <- dfmeta_longLPW %>% rename(., "wavenumber" = "name") # rename name column to wavenumber for clarification
 dfmeta_longLPW$wavenumber <- as.numeric(as.character(dfmeta_longLPW$wavenumber)) # change class of wavenumber variable to a numeric
 # Plot 7 specimens to see if data loaded properly.
+```
+
+### Plot check
+
+```{r, cache = T}
 ggplot() +
   geom_path(
     data = dfmeta_longLPW[dfmeta_longLPW$specimen %in% c(1, 10, 100, 101, 102, 103, 104), ],
@@ -318,11 +324,11 @@ rm(pca_all_LPW, pcs, dfmeta_longLPW)
 
 Scan #1 confirmed to be quite different.  Something appears to have changed between scan periods, however it is unknown exactly what occurred.  Approximately 10 months elapsed between scan 1 & scan 2.  All future analysis will combine absorbance measurements from scans 2, 3 & 4 and average.  
 
-## Average Scans
+## Average Scans 2-4
 
 Combining/averaging LPW FT-NRIS scans 2, 3 & 4 preprocessing & filtering spectra >7500 cm-1. Combining scans 2, 3 & 4 into a single average scan. Scan 1 is being ignored due to PCA above  
 
-Spectral preprocessing serves to remove unwanted noise from absorbance measurements, filter out NIR backscatter, and can  improve model fits by increasing variability of absorbance measurements at wavenumbers between specimens.  Initial preprocessing done with prospectr and a savitzkygolay filter.  Will stick with one method and explore others later if time allows.
+Spectral preprocessing serves to remove unwanted noise from absorbance measurements, filter out NIR backscatter, and can  improve model fits by increasing variability of absorbance measurements at wavenumbers between specimens.  Initial preprocessing done with prospectr and a Savitzky-Golay filter (1st derivative, 3rd order, 17-point).  Will stick with one method and explore others later if time allows.
 
 Removing noisy stretch of spectra > 7500 cm-1 - similar approach done by Matta et al. in Walleye Pollock daily age paper and seems typical for otolith FT-NIRS work.  
 
@@ -351,11 +357,9 @@ rm(scan_avg)
 
 # Model Age - FT-NIRS
 
-### MLRs & GAMs
+### PCA
 
-#### PCA
-
-Look for outliers in first 2 PC's, colored by age
+#### First 2 PC's, colored by age
 ```{r, cache = T}
 scan_avg_filter <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
 pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
@@ -378,11 +382,16 @@ ggplotly(
 rm(rm_specimens)
 ```
 
-Removing above identified outliers
+#### Removing above identified outliers
 
 ```{r message=FALSE, echo = T, results = F, cache=TRUE}
 scan_avg_filter <- scan_avg_filter %>%
   dplyr::filter(read_age != 188, read_age != 181, read_age != 175, read_age != 161, read_age != 147, read_age != 135, specimen != 65)
+```
+
+### MLRs & GAMs
+
+```{r message=FALSE, echo = T, results = 'hide', cache=TRUE}
 # store metrics from each fold and each model type
 RMSE.age <- list()
 r2.age <- list()
@@ -417,7 +426,7 @@ for (i in 1:10) {
 mod.sel <- list()
 for (i in 1:10) {
   pctest <- cal[[i]]
-  temp <- step(lm(data = pctest[-splits[[i]], ], read_age ~ PC1 + PC2 + PC3 + PC4))
+  temp <- step(lm(data = pctest[-splits[[i]], ], read_age ~ PC1 + PC2 + PC3 + PC4),trace = 0)
   mod.sel[[i]] <- rownames(summary(temp)$coef)
   rm(pctest, temp)
 }
@@ -428,6 +437,10 @@ rm(mod.sel)
 ```
 
 PC 2 will be excluded for now.
+
+
+
+
 
 #### MLR
 
@@ -555,6 +568,18 @@ mod.summary[4, 3] <- round(mean(RMSE.age$vip.test), 3)
 rm(r2.age, RMSE.age)
 knitr::kable(mod.summary, align = "c")
 ```
+
+### Shiny
+
+```{r echo=FALSE} 
+runApp("app.R", display.mode = "showcase")
+```
+
+```{r}
+knitr::includeHTML("plots/shiny_plot.html")
+```
+
+
 # Plots
 
 ### Correlation 
@@ -782,7 +807,8 @@ ggplotly(
 rm(age_only, rm_specimens)
 ```
 
-# Model Age - length & structure weight
+# Model Age - length + structure weight
+
 ```{r, cache = T}
 # Create dataframe only with ages contained in metadata
 age_only <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")

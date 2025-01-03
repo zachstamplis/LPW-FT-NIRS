@@ -1,38 +1,46 @@
-# Similar to LPW - read in spectra
-```{r}
-setwd("../")
-ibm_meta<-read.csv("IBM_metadata.csv", header = TRUE)
-names(ibm_meta)
-levels(as.factor(as.character(ibm_meta$session_title)))
-ibm_meta<-ibm_meta[ibm_meta$file_name !="",]
-#I set my directory to where i saved the spectra
-setwd("IBM_scans")
-ibm_meta$file_path<-paste0(getwd(),"/",ibm_meta$file_name)
+---
+title: FT-NIRS Otolith Age Prediction - IBM
+output: 
+  html_document:
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+
+# Importing FT-NIRS Spectra
+
+### Metadata
+
+```{r, cache = T}
+ibm_meta<-read.csv("metadata/IBM_metadata.csv", header = TRUE)
+ibm_meta<-ibm_meta[ibm_meta$file_name !="",] # 8 specimens removed (missing scans?)
+ibm_meta$file_path<-paste0(getwd(), "/FT-NIRS_spectra/IBM_scans/", ibm_meta$file_name)
 Opusfiles<-as.vector(ibm_meta$file_path)
 exists<-as.vector(lapply(Opusfiles, file.exists))
 ibm_meta$exists<-exists
-meta1<-ibm_meta[ibm_meta$exists=="TRUE",] #filter the file list and data by otoliths with spectra files
-Opusfiles<-as.vector(meta1$file_path) #I repeated this and wrote over it so I wouldn't have extra files to read in that don't exist and produce an error
+meta1<-ibm_meta[ibm_meta$exists=="TRUE",]
+Opusfiles<-as.vector(meta1$file_path)
 rm(exists)
 rm(meta1)
 ```
-# Read in spectra files
-# Note that if you have a file open in OPUS, you can't open the same file in R
-```{r, include=FALSE,results='hide',message=FALSE,warning=FALSE}
 
+### Opus files
+
+```{r, cache = T}
 file <- Opusfiles[1]
 data_list <- read_opus(dsn = file)
 rm(data_list)
 rm(file)
-SPCfiles_nooffset<-lapply(Opusfiles,read_opus) #this gives an error if any file names or paths are wrong
+SPCfiles_nooffset<-lapply(Opusfiles,read_opus)
 spectra<-lapply(SPCfiles_nooffset, function (x) x[[1]]$ab$data)
 species<-lapply(SPCfiles_nooffset,function (x) x$lab_and_process_param_raw$parameters$FC2$parameter_value)
 file_id<-lapply(SPCfiles_nooffset,function (x) x$lab_and_process_param_raw$parameters$FD1$parameter_value)
-instrument<-lapply(SPCfiles_nooffset,function (x) x[[1]]$instrument_ref$parameters$INS$parameter_value) #instrument exists for all files, but 
-wavenumber<-lapply(SPCfiles_nooffset,function (x) x[[1]]$ab$wavenumbers)#these could differ if settings changed or in light sources change
+instrument<-lapply(SPCfiles_nooffset,function (x) x[[1]]$instrument_ref$parameters$INS$parameter_value)
+wavenumber<-lapply(SPCfiles_nooffset,function (x) x[[1]]$ab$wavenumbers)
 spectra<-lapply(spectra,as.data.frame)
 for (i in 1:length(spectra)){
-  colnames(spectra[[i]])<-wavenumber[[i]] #need to assign column  names first or else there will be an issue with subsequent names added
+  colnames(spectra[[i]])<-wavenumber[[i]]
 }
 for (i in 1:length(spectra)){
   spectra[[i]]$species<-species[[i]]
@@ -46,28 +54,31 @@ for (i in 1:length(spectra)){
 for (i in 1:length(spectra)){
   spectra[[i]]$file_path<-Opusfiles[[i]]
 }
-#I need to get the file names from the long list
 file_name<-lapply(spectra, function (x) splitstackshape::cSplit(as.data.frame(x$file_path),sep="/",splitCols="x$file_path",type.convert=FALSE)%>%select(tail(names(.), 1)))
 for (i in 1:length(spectra)){
   spectra[[i]]$file_name<-file_name[[i]][[1,1]]
 }
 ```
-Make a spectra dataframe
-```{r, include=FALSE,results='hide',message=FALSE,warning=FALSE}`{r}
+
+### Combine dataframes
+
+```{r, cache = T}
 df <- as.data.frame(do.call(rbind,spectra))
-dfmeta_IBM<-dplyr::left_join(ibm_meta,df,by=c("file_name","file_path"))#note that instrument names are different in the metadata file vs. OPUS files. 
+dfmeta_IBM<-dplyr::left_join(ibm_meta,df,by=c("file_name","file_path"))
 dfmeta_IBM<-dfmeta_IBM%>%dplyr::select(.,-c(exists, instrument))
 rm(ibm_meta, df, wavenumber, spectra, instrument, species, SPCfiles_nooffset,file_id)
-
 colnames(dfmeta_IBM)<-as.character(colnames(dfmeta_IBM))
-
+dfmeta_IBM$run_number <- as.factor(dfmeta_IBM$run_number)
+# saveRDS(dfmeta_IBM, "RDS_dataframes/IBM_dfmeta.RDS")
 dfmeta_IBM_long<-tidyr::pivot_longer(dfmeta_IBM, cols= -c(1:24)) #make it long format to plot it
 dfmeta_IBM_long<-dfmeta_IBM_long%>%rename(.,"wavenumber"="name")
 dfmeta_IBM_long$wavenumber<-as.numeric(as.character(dfmeta_IBM_long$wavenumber))
-dfmeta_IBM_long$specimen <- as.factor(dfmeta_IBM_long$specimen)
-dfmeta_IBM_long$run_number <- as.factor(dfmeta_IBM_long$run_number)
+rm(Opusfiles, file_name)
+```
 
-#check a plot
+### Plot check
+
+```{r, cache = T}
 ggplot()+
   geom_path(data=dfmeta_IBM_long[dfmeta_IBM_long$specimen %in% c(423801,423812,423818,423902, 423904,423914,423918), ] ,aes(x=wavenumber,y=value,group=file_name),linewidth=.5)+ 
   scale_x_reverse()+
@@ -82,144 +93,473 @@ ggplot()+
         panel.background = element_blank(), 
         axis.line = element_line(colour = "black"))+
   facet_wrap(~specimen)
-saveRDS(dfmeta_IBM, "RDS_dataframes/IBM_dfmeta.RDS")
 ```
-# Look at spectra
+
+# Exploratory Analysis
+
+### Spectra - Scans 1 vs 2
+
 ```{r}
-ggplot(dfmeta_IBM_long[dfmeta_IBM_long$run_number %in% c(1,2),]) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name)) + 
+ggplot(dfmeta_IBM_long) + geom_path(aes(x = wavenumber, y = value, color = run_number, group = file_name), alpha = 0.5) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Run Number") +
   scale_color_viridis(discrete = T) + 
   scale_x_reverse() + 
   ggtitle("LPW FT-NIRS Spectra, Scans 1 & 2")
-# scan 1 and 2 look WAY different, only use scan 2
 ```
-# Preprocess
-```{r}
+
+### PCA - compare runs
+
+```{r, cache = T}
+pca_IBM <- pca(dfmeta_IBM[25:ncol(dfmeta_IBM)], scale = T)
+pcs <- as.data.frame(cbind(pc2 = pca_IBM$calres$scores[, 2], run_number = dfmeta_IBM$run_number)) # extract scores for PC2
+pcs <- cbind(pc1 = pca_IBM$calres$scores[, 1], pcs) # extract scores for PC1
+# plot PC1 & PC2, colored by run_number
+ggplot(pcs) +
+  geom_point(aes(x = pc1, y = pc2, color = as.factor(run_number)), size = 3) +
+  labs(x = paste("PC1 (",
+                 round(pca_IBM$calres$expvar[1], digits = 3), # variance explained by PC1
+                 "% var. explained )"),
+       y = paste("PC2 (", 
+                 round(pca_IBM$calres$expvar[2], digits = 3), # variance explained by PC2
+                 "% var. explained )"),
+       color = "Run Number"
+  ) +
+  scale_color_viridis(discrete = T)
+rm(pca_IBM, pcs)
+```
+
+Will only use new scans from cleaned otoliths (run 2)
+
+## Preprocessing
+```{r, cache = T}
 # preprocess immediately right now
 dfmeta_IBM_proc <- cbind(dfmeta_IBM[, c(1:24)],prospectr::savitzkyGolay(dfmeta_IBM[,25:ncol(dfmeta_IBM)],m = 1, p = 3, w = 17))
 dfmeta_IBM_proc_long <- pivot_longer(dfmeta_IBM_proc, cols = `11472`:`4016`, names_to = "name", values_to = "value")
 dfmeta_IBM_proc_long$name <- as.numeric(dfmeta_IBM_proc_long$name)
+```
 
-# UNPROCESSED
+#### Spectra - Raw
+
+```{r, cache = T}
 ggplot(dfmeta_IBM_long[dfmeta_IBM_long$run_number == 2,]) + geom_path(aes(x = wavenumber, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
   scale_x_reverse()
+```
 
-# SAVITZKY
-ggplot(dfmeta_IBM_proc_long[dfmeta_IBM_proc_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+#### Spectra - Savitzky-Golay
+
+```{r, cache = T}
+plot1 <- ggplot(dfmeta_IBM_proc_long[dfmeta_IBM_proc_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
-  scale_x_reverse()
-# really noisy looking beginning section...!
+  scale_x_reverse() + 
+  ggtitle("SG")
+plot1
+```
 
+This data looks really noisy after applying a Savitzky-Golay filter.  Going to look at using standard normal variate (SNV) to correct first.
+
+## SNV
+
+#### Spectra - SNV
+
+```{r, cache = T}
 testing1 <- prep.snv(as.matrix(dfmeta_IBM[,25:ncol(dfmeta_IBM)]))
 testing1 <- as.data.frame(unlist(testing1))
 testing1 <- cbind(dfmeta_IBM[,1:24], testing1)
 testing1_long <- pivot_longer(testing1, cols = `11536`:`3952`, names_to = "name", values_to = "value")
 testing1_long$name <- as.numeric(testing1_long$name)
-# SNV NORMALIZATION
-ggplot(testing1_long[testing1_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+plot2 <- ggplot(testing1_long[testing1_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
-  scale_x_reverse()
+  scale_x_reverse() + 
+  ggtitle("SNV")
+plot3
+rm(testing1_long)
+```
 
+SNV normalization on it's own looks very strange.  Will trying combinations of filters.
+
+#### Spectra - SNV + SG
+
+```{r, cache = T}
 testing2 <- cbind(testing1[, c(1:24)],prospectr::savitzkyGolay(testing1[,25:ncol(testing1)],m = 1, p = 3, w = 17))
 testing2_long <- pivot_longer(testing2, cols = `11472`:`4016`, names_to = "name", values_to = "value")
 testing2_long$name <- as.numeric(testing2_long$name)
-# SAVITZKY AFTER SNV
-ggplot(testing2_long[testing2_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+plot3 <- ggplot(testing2_long[testing2_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
-  scale_x_reverse()
+  scale_x_reverse() + 
+  ggtitle("SNV + SG")
+grid.arrange(plot2,plot1,plot3,ncol = 1)
+rm(testing2_long)
+```
 
+Using both SNV & SG doesn't appear to change much, may just use SG on its own.  Will remove wavenumbers >7500 like in LPW preprocessing now.
+
+#### Spectra - SG + <7500
+
+```{r, cache = T}
 testing3 <- dfmeta_IBM[,-c(25:529)]
 testing3 <- cbind(testing3[, c(1:24)],prospectr::savitzkyGolay(testing3[,25:ncol(testing3)],m = 1, p = 3, w = 17))
 testing3_long <- pivot_longer(testing3, cols = `7432`:`4016`, names_to = "name", values_to = "value")
 testing3_long$name <- as.numeric(testing3_long$name)
-# remove > 7500 first, then SAVITZKY
-ggplot(testing3_long[testing3_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+plot4 <- ggplot(testing3_long[testing3_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
-  scale_x_reverse()
+  scale_x_reverse() + 
+  ggtitle("SG & <7500")
+rm(testing3_long)
+```
 
+#### Spectra - SNV + SG + <7500
 
+```{r, cache = T}
 testing4 <- testing2[,-c(25:521)]
 testing4_long <- pivot_longer(testing4, cols = `7496`:`4016`, names_to = "name", values_to = "value")
 testing4_long$name <- as.numeric(testing4_long$name)
 # <7500 for SNV -> SAVITZKY
-ggplot(testing4_long[testing4_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
+plot5 <- ggplot(testing4_long[testing4_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
   labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
   scale_color_viridis() + 
-  scale_x_reverse()
-```
-# NORMALIZE THEN SG FILTER
-```{r}
-test1 <- prep.snv(as.matrix(dfmeta_LPW[,21:ncol(dfmeta_LPW)]))
-test1 <- as.data.frame(unlist(test1))
-test1 <- cbind(dfmeta_LPW[,1:20], test1)
-test1_long <- pivot_longer(test1, cols = `11536`:`3952`, names_to = "name", values_to = "value")
-test1_long$name <- as.numeric(test1_long$name)
-# snv
-ggplot(test1_long[test1_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
-  scale_color_viridis() + 
-  scale_x_reverse()
-
-test2 <- cbind(test1[, c(1:20)],savitzkyGolay(test1[,21:length(test1)],m = 1, p = 3, w = 17))
-test2_long <- pivot_longer(test2, cols = `11472`:`4016`, names_to = "name", values_to = "value")
-test2_long$name <- as.numeric(test2_long$name)
-# snv -> SAVITZKY
-ggplot(test2_long[test2_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
-  scale_color_viridis() + 
-  scale_x_reverse()
-
-test3 <- test2[,-c(21:517)]
-test3_long <- pivot_longer(test3, cols = `7496`:`4016`, names_to = "name", values_to = "value")
-test3_long$name <- as.numeric(test3_long$name)
-# remove >7500 from snv -> savitzky
-ggplot(test3_long[test3_long$run_number == 2,]) + geom_path(aes(x = name, y = value, color = length, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
-  scale_color_viridis() + 
-  scale_x_reverse() + geom_path(data = testing4_long[testing4_long$run_number == 2,], aes(x = name, y = value, color = length, group = file_name))
-
-
-scan_avg <- cbind(scan_avg[, c(1:20)],savitzkyGolay(scan_avg[,21:length(scan_avg)],m = 1, p = 3, w = 17))
-scan_avg_long <- pivot_longer(scan_avg, cols = `11472`:`4016`, names_to = "name", values_to = "value")
-scan_avg_long$name <- as.numeric(scan_avg_long$name)
-
-
-
-
-
-ggplot(dfmeta_longLPW[dfmeta_longLPW$run_number == 2,]) + geom_path(aes(x = wavenumber, y = value, color = length, group = file_name)) + 
-  labs(y = "Absorbance units", x = expression(paste("Wavenumber ", cm^-1)), color = "Length (mm)") +
-  scale_color_viridis() + 
-  scale_x_reverse()
-
+  scale_x_reverse() + 
+  ggtitle("SNV + SG & <7500")
+rm(testing4_long)
+grid.arrange(plot4,plot5,ncol = 1)
+rm(plot1,plot2,plot3,plot4,plot5,testing1,testing2,testing2_long,testing3,testing4,dfmeta_IBM_long,dfmeta_IBM_proc,dfmeta_IBM_proc_long)
 ```
 
-# extract specimen numbers from rescans
+To make things simpler, I will do same preprocessing as LPW: remove wavenumbers >7500 cm-1 and apply a Savitzky-Golay filter (1st derivative, 3rd order, 17-point).
+
+
+
+## Preprocess/Filter data
+
+```{r, cache = T}
+# preprocess, filter data
+dfmeta_IBM_proc <- cbind(dfmeta_IBM[, c(1:24)],prospectr::savitzkyGolay(dfmeta_IBM[,25:ncol(dfmeta_IBM)],m = 1, p = 3, w = 17))
+dfmeta_IBM_proc <- dfmeta_IBM_proc[,-c(25:521)]
+rm(dfmeta_IBM)
+# saveRDS(dfmeta_IBM_proc, "RDS_dataframes/IBM_proc_filter.RDS")
+```
+
+## PCA looking for outliers
+
 ```{r}
-testing1 <- cat(strings, "\n") # concatenates all filenames in a directory and adds a space delimiter
+pca_temp <- pca(dfmeta_IBM_proc[, 25:ncol(dfmeta_IBM_proc), ])
+dfmeta_IBM_proc$PC1 <- pca_temp$res$cal$scores[, 1]
+dfmeta_IBM_proc$PC2 <- pca_temp$res$cal$scores[, 2]
+rm(pca_temp)
+library(plotly)
+ggplotly(
+  ggplot() +
+    geom_point(data = dfmeta_IBM_proc,
+               aes(x = PC1, y = PC2, color = length), size = 2
+    ) + 
+    scale_color_viridis()
+)
+rm(rm_specimens)
+```
+
+# Model Length - FT-NIRS
+
+#### Load Data
+
+```{r}
+dfmeta_LPW_proc <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+dfmeta_LPW_proc <- dfmeta_LPW_proc[complete.cases(dfmeta_LPW_proc$structure_weight), ]
+# only select scan 2, otoliths with weight > 0.0001
+dfmeta_IBM_proc <- readRDS("RDS_dataframes/IBM_proc_filter.RDS")
+dfmeta_IBM_proc <- dfmeta_IBM_proc %>% dplyr::filter(run_number == 2, structure_weight > 0.0001)
+# store metrics
+RMSE.weight <- list()
+r2.weight <- list()
+AIC.weight <- list()
+AICc.weight <- list()
+mod.summary.weight <- data.frame(
+  model = c("lm", "gam", "pls","pls_vip", "lm.IBM", "gam.IBM", "pls.IBM", "vip.IBM"),
+  r2 = 1:8,
+  RMSE = 1:8,
+  AIC = c(0,0,NA,NA,NA,NA,NA,NA),
+  AICc = c(0,0,NA,NA,NA,NA,NA,NA))
+preds.IBM <- list()
+```
+
+#### Pick PC's
+
+```{r}
+# 10-fold CV split for LPW models - create folds
+set.seed(6)
+splits <- caret::createFolds(dfmeta_LPW_proc$structure_weight, k = 10, list = TRUE, returnTrain = FALSE)
+# extract PC's for each LPW calibration set, apply PC rotation to LPW test set and IBM dataset as well
+cal <- list()
+test <- list()
+test.IBM <- list()
+for (i in 1:10) {
+  # calibration set and PC's
+  pc.mod <- preProcess(dfmeta_LPW_proc[-splits[[i]], -c(1:20)], method = "pca", thresh = 0.95, pcaComp = 10)
+  pc.cal <- predict(pc.mod, dfmeta_LPW_proc[-splits[[i]], -c(1:20)])
+  pc.cal <- cbind(pc.cal, dfmeta_LPW_proc[-splits[[i]], ])
+  cal[[i]] <- pc.cal
+  rm(pc.cal)
+  # test sets
+  pc.test <- predict(pc.mod, dfmeta_LPW_proc[splits[[i]], -c(1:20)])
+  pc.test <- cbind(pc.test, dfmeta_LPW_proc[splits[[i]], ])
+  test[[i]] <- pc.test
+  # PC's for IBM
+  pc.IBM <- predict(pc.mod, dfmeta_IBM_proc[,-c(1:24)])
+  pc.IBM <- cbind(pc.IBM, dfmeta_IBM_proc)
+  test.IBM[[i]] <- pc.IBM
+  rm(pc.mod, pc.test, pc.IBM)
+}
+# determine which PC's to include via step & AIC selection
+```
+
+```{r results = 'hide', message = F, warning = F}
+mod.sel <- list()
+invisible(
+  for (i in 1:10) {
+  pctest <- cal[[i]]
+  temp <- step(lm(data = pctest[-splits[[i]], ], length ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6),trace = 0)
+  mod.sel[[i]] <- rownames(summary(temp)$coef)
+  rm(pctest, temp)
+}
+)
+```
+
+```{r}
+knitr::kable(table(unlist(mod.sel)), align = "c")
+```
+
+Use PC's 1,3,4,6
+
+## MLR
+
+```{r}
+mods.lm.weight <- list()
+preds.temp <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- lm(data = calibrate, structure_weight ~ PC1 + PC3 + PC4 + PC6)
+  preds <- predict(mod, newdata = testing)
+  RMSE.weight$lm.test[i] <- caret::RMSE(pred = preds, obs = testing[, "structure_weight"])
+  RSS <- sum((testing$structure_weight - preds)^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  r2.weight$lm.test[i] <- 1 - (RSS / TSS)
+  AIC.weight$lm[i] <- AIC(mod)
+  AICc.weight$lm[i] <- AICc(mod)
+  mods.lm.weight[[i]] <- mod
+  # IBM
+  testing <- test.IBM[[i]]
+  preds.temp[[i]] <- predict(mod, newdata = testing)
+  RMSE.weight$lm.IBM[i] <- caret::RMSE(pred = preds.temp[[i]], obs = dfmeta_IBM_proc[, "structure_weight"])
+  RSS <- sum((testing$structure_weight -  preds.temp[[i]])^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  r2.weight$lm.IBM[i] <- 1 - (RSS / TSS)
+  rm(mod, preds, RSS, TSS)
+}
+preds.IBM$lm <- preds.temp
+rm(preds.temp)
+mod.summary.weight[1,2] <- round(mean(r2.weight$lm.test), 3)
+mod.summary.weight[1,3] <- round(mean(RMSE.weight$lm.test), 3)
+mod.summary.weight[1,4] <- round(mean(AIC.weight$lm) , 3)
+mod.summary.weight[1,5] <- round(mean(AICc.weight$lm) , 3)
+mod.summary.weight[5,2] <- round(mean(r2.weight$lm.IBM), 3)
+mod.summary.weight[5,3] <- round(mean(RMSE.weight$lm.IBM), 3)
+```
+
+## GAM
+
+```{r message=FALSE, cache=TRUE}
+# GAM with 10 fold CV, select = T allows PCs to be penalized and effectively removed from model if appropriate.
+mods.gam.weight <- list()
+preds.temp <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- gam(data = calibrate, structure_weight ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6), method = "REML")
+  preds <- predict(mod, newdata = testing)
+  RSS <- sum((testing$structure_weight - preds)^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  RMSE.weight$gam.test[i] <- caret::RMSE(pred = preds, obs = testing[, "structure_weight"])
+  r2.weight$gam.test[i] <- 1 - (RSS / TSS)
+  AIC.weight$gam[i] <- AIC(mod)
+  AICc.weight$gam[i] <- AICc(mod)
+  mods.gam.weight[[i]] <- mod
+  # IBM
+  testing <- test.IBM[[i]]
+  preds.temp[[i]] <- predict(mod, newdata = testing)
+  RSS <- sum((testing$structure_weight - preds.temp[[i]])^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  RMSE.weight$gam.IBM[i] <- caret::RMSE(pred = preds.temp[[i]], obs = dfmeta_IBM_proc[, "structure_weight"])
+  r2.weight$gam.IBM[i] <- 1 - (RSS / TSS)
+  rm(mod, RSS, TSS, i, calibrate, testing)
+}
+preds.IBM$gam <- preds.temp
+rm(preds.temp)
+mod.summary.weight[2,2] <- round(mean(r2.weight$gam.test), 3)
+mod.summary.weight[2,3] <- round(mean(RMSE.weight$gam.test), 3)
+mod.summary.weight[2,4] <- round(mean(AIC.weight$gam), 3)
+mod.summary.weight[2,5] <- round(mean(AICc.weight$gam), 3)
+mod.summary.weight[6,2] <- round(mean(r2.weight$gam.IBM), 3)
+mod.summary.weight[6,3] <- round(mean(RMSE.weight$gam.IBM), 3)
+rm(AIC.weight, AICc.weight)
+```
+
+## PLS
+
+```{r, cache = T}
+mods.pls.weight <- list()
+mods.vip.weight <- list()
+preds.temp1 <- list()
+preds.temp2 <- list()
+# pls, no variable selection & VIP > 1
+for (i in 1:10) {
+  calibrate <- dfmeta_LPW_proc[-splits[[i]], ]
+  testing <- dfmeta_LPW_proc[splits[[i]], ]
+  mod <- pls(calibrate[, 21:ncol(calibrate)], calibrate[, "structure_weight"],
+    ncomp.selcrit = "wold", scale = F, center = T, cv = 1,
+    info = "Otolith Weight Prediction Model",
+    x.test = testing[, 21:ncol(testing)],
+    y.test = testing[, "structure_weight"]
+  )
+  ncomp <- mod$ncomp.selected
+  RMSE.weight$pls.test[i] <- mod$testres$rmse[[ncomp]]
+  r2.weight$pls.test[i] <- mod$testres$r2[[ncomp]]
+  mods.pls.weight[[i]] <- mod
+  # IBM
+  testing <- test.IBM[[i]]
+  preds.temp1[[i]] <- predict(
+    mod,
+    dfmeta_IBM_proc[, c(25:ncol(dfmeta_IBM_proc))],
+    dfmeta_IBM_proc[, 3]
+  )
+  ncomp <- preds.temp1[[i]]$ncomp.selected
+  RMSE.weight$pls.IBM[i] <- preds.temp1[[i]]$rmse[ncomp]
+  r2.weight$pls.IBM[i] <- preds.temp1[[i]]$r2[ncomp]
+  ### VIP > 1
+  vip <- as.data.frame(vipscores(mod))
+  testing <- dfmeta_LPW_proc[splits[[i]], ]
+  mod <- pls(calibrate[, 21:ncol(calibrate)], calibrate[, "structure_weight"],
+    ncomp.selcrit = "wold", scale = F, center = T, cv = 1,
+    info = "Otolith Weight Prediction Model",
+    x.test = testing[, 21:ncol(testing)],
+    y.test = testing[, "structure_weight"],
+    exclcols = vip$V1 < 1
+  )
+  ncomp <- mod$ncomp.selected
+  ncomp <- mod$ncomp.selected
+  RMSE.weight$vip.test[i] <- mod$testres$rmse[[ncomp]]
+  r2.weight$vip.test[i] <- mod$testres$r2[[ncomp]]
+  mods.vip.weight[[i]] <- mod
+  # IBM
+  testing <- test.IBM[[i]]
+  preds.temp2[[i]] <- predict(
+    mod,
+    dfmeta_IBM_proc[, c(25:ncol(dfmeta_IBM_proc))],
+    dfmeta_IBM_proc[, 3]
+  )
+  ncomp <- preds.temp2[[i]]$ncomp.selected
+  RMSE.weight$vip.IBM[i] <- preds.temp2[[i]]$rmse[ncomp]
+  r2.weight$vip.IBM[i] <- preds.temp2[[i]]$r2[ncomp]
+  rm(calibrate, mod, ncomp, testing, i, vip)
+}
+preds.IBM$pls <- preds.temp1
+preds.IBM$vip <- preds.temp2
+rm(preds.temp1, preds.temp2)
+mod.summary.weight[3, 2] <- round(mean(r2.weight$pls.test), 3)
+mod.summary.weight[3, 3] <- round(mean(RMSE.weight$pls.test), 3)
+mod.summary.weight[4, 2] <- round(mean(r2.weight$vip.test), 3)
+mod.summary.weight[4, 3] <- round(mean(RMSE.weight$vip.test), 3)
+mod.summary.weight[7, 2] <- round(mean(r2.weight$pls.IBM), 3)
+mod.summary.weight[7, 3] <- round(mean(RMSE.weight$pls.IBM), 3)
+mod.summary.weight[8, 2] <- round(mean(r2.weight$vip.IBM), 3)
+mod.summary.weight[8, 3] <- round(mean(RMSE.weight$vip.IBM), 3)
+knitr::kable(mod.summary.weight, align = "c")
+rm(r2.weight,RMSE.weight)
+```
+
+# Results
+
+### Plots
+
+```{r}
+rm(r2.weight, RMSE.weight)
+preds.IBM$structure_weight <- dfmeta_IBM_proc$structure_weight
+preds.IBM$pcs <- list()
+for(i in 1:10){
+  preds.IBM$pcs[[i]] <- test.IBM[[i]][1:10]
+}
+# lm predictions
+ggplot() + 
+  geom_point(aes(x = preds.IBM$lm[[1]], y = preds.IBM$y)) +
+  geom_abline(aes(slope = 1, intercept = 0))
+# GAM
+ggplot() + 
+  geom_point(aes(x = preds.IBM$gam[[1]], y = preds.IBM$y)) +
+  geom_abline(aes(slope = 1, intercept = 0))
+# PLS
+ncomp <- preds.IBM$pls[[1]]$ncomp.selected
+
+ggplot() +
+  geom_point(aes(x = preds.IBM$pls[[1]]$y.pred[,ncomp,1], 
+                 y = preds.IBM$pls[[1]]$y.ref), col = "red") + 
+  scale_y_continuous(limits = c(0,0.004)) +
+  scale_x_continuous(limits = c(-0.01, 0.005)) + 
+  geom_abline(aes(slope = 1, intercept = 0))
+  
 
 
+ggplot() +
+  geom_smooth(aes(x = preds.IBM$pls[[1]]$y.pred[,ncomp,1], 
+                 y = preds.IBM$pls[[1]]$y.ref), 
+              method = "lm", se = T,
+              col = "red") + 
+  scale_y_continuous(limits = c(0,0.004)) +
+  scale_x_continuous(limits = c(-0.01, 0.005)) + 
+  geom_abline(aes(slope = 1, intercept = 0))
+# VIP
+ggplot() + 
+  geom_point(aes(x = preds.IBM$vip[[1]]$y.ref, y = preds.IBM$y)) +
+  geom_abline(aes(slope = 1, intercept = 0))
 
-list.files(path = "IBM_scans")
 
+  geom_smooth(method = "lm", formula = structure_weight ~ PC1 + PC3 + PC4 + PC6, mapping = aes(x = ))
+plot_lm
 
+mods.lm.weight[[1]]$terms
+coef(mods.lm.weight[[1]])
 
-strings <- list.files(path = "get_filename", )
-library(stringr)
-# Define the pattern to match
-pattern <- "(?<=JJ202101202_)\\d+(?=_.+)"
-# Use str_extract_all to extract matches from each string
-matches <- str_extract_all(strings, pattern)
-testing <- unlist(matches)
-# Convert the matches to a data frame for easier inspection
-df <- data.frame(numbers = unlist(matches))
-print(df)
-testing
+preds.IBM$pls[[1]]$y.pred[,ncomp,1]
+
+```
+try log link function for GAM
+```{r}
+r2.weight <- list()
+RMSE.weight <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  mod <- gam(data = calibrate, structure_weight ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6), method = "REML")
+  preds <- predict(mod, newdata = testing)
+  RSS <- sum((testing$structure_weight - preds)^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  RMSE.weight$gam.test[i] <- caret::RMSE(pred = preds, obs = testing[, "structure_weight"])
+  r2.weight$gam.test[i] <- 1 - (RSS / TSS)
+  AIC.weight$gam[i] <- AIC(mod)
+  AICc.weight$gam[i] <- AICc(mod)
+  mods.gam.weight[[i]] <- mod
+  # IBM
+  testing <- test.IBM[[i]]
+  preds.temp[[i]] <- predict(mod, newdata = testing)
+  RSS <- sum((testing$structure_weight - preds.temp[[i]])^2)
+  TSS <- sum((testing$structure_weight - mean(testing$structure_weight))^2)
+  RMSE.weight$gam.IBM[i] <- caret::RMSE(pred = preds.temp[[i]], obs = dfmeta_IBM_proc[, "structure_weight"])
+  r2.weight$gam.IBM[i] <- 1 - (RSS / TSS)
+  rm(mod, RSS, TSS, i, calibrate, testing)
+}
+
 ```
 

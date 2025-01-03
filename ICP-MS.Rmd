@@ -1,0 +1,332 @@
+---
+title: ICP-MS Data - IBM
+output: 
+  html_document:
+    theme: simplex
+    toc: yes
+    toc_float:
+      collapsed: true
+---
+```{r}
+# Install packages not yet installed
+packages <- c("hablar", "readxl", "tidyverse")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  utils::install.packages(pkgs = packages[!installed_packages])
+}
+invisible(lapply(packages, library, character.only = TRUE)) # load all packages in list
+# install packages not on CRAN
+if (!require("remotes")) install.packages("remotes")
+rm(installed_packages, packages) # remove objects from environment
+```
+# Read in XLSX, fix ugly sheet names, combine into list of dataframes
+```{r}
+library(readxl)
+library(tidyverse)
+path <- "ICP-MS/ICP-MS_rawdata.xlsx"
+testing1 <- path %>% 
+  excel_sheets() %>% 
+  set_names() %>% 
+  map(read_xlsx, path = path)
+rm(path)
+saveRDS(testing1, "RDS_dataframes/ICP-MS_raw.RDS")
+testing <- readRDS("RDS_dataframes/ICP-MS_raw.RDS")
+specimen.vars <- c(
+  "oto01-0", "oto01-1", "oto01-2", "oto01-3", 
+  "oto10-0", "oto10-1", "oto10-2", "oto10-3",
+  "oto11-0", "oto11-1", "oto11-2", "oto11-3",
+  "oto12-0", "oto12-1", "oto12-2", "oto12-3",
+  "oto13-0", "oto13-1", "oto13-2", "oto13-3",
+  "oto15-0", "oto15-1", "oto15-2", "oto15-3",
+  "oto16-0", "oto16-1", "oto16-2", "oto16-3",
+  "oto17-0", "oto17-1", "oto17-2", "oto17-3",
+  "oto18-0", "oto18-1", "oto18-2", "oto18-3",
+  "oto19-0", "oto19-1", "oto19-2", "oto19-3",
+  "oto02-0", "oto02-1", "oto02-2", "oto02-3",
+  "oto20-0", "oto20-1", "oto20-2", "oto20-3",
+  "oto21-0", "oto21-1", "oto21-2", "oto21-3",
+  "oto22-0", "oto22-1", "oto22-2", "oto22-3",
+  "oto23-0", "oto23-1", "oto23-2", "oto23-3",
+  "oto24-0", "oto24-1", "oto24-2",
+  "oto25-0", "oto25-1", "oto25-2", "oto25-3",
+  "oto26-0", "oto26-1", "oto26-2", "oto26-3",
+  "oto27-0", "oto27-1", "oto27-2", "oto27-3",
+  "oto28-0", "oto28-1", "oto28-2", "oto28-3",
+  "oto29-0", "oto29-1", "oto29-2", "oto29-3",
+  "oto03-0", "oto03-1", "oto03-2", "oto03-3",
+  "oto30-0", "oto30-1", "oto30-2", "oto30-3",
+  "oto31-0", "oto31-1", "oto31-2", "oto31-3",
+  "oto32-0", "oto32-1", "oto32-2", "oto32-3",
+  "oto33-0", "oto33-1", "oto33-2", "oto33-3",
+  "oto34-0", "oto34-1", "oto34-2", "oto34-3",
+  "oto35-0", "oto35-1", "oto35-2", "oto35-3",
+  "oto36-0", "oto36-1", "oto36-2", "oto36-3",
+  "oto37-0", "oto37-1", "oto37-2", "oto37-3",
+  "oto38-0", "oto38-1", "oto38-2", "oto38-3",
+  "oto39-0", "oto39-1", "oto39-2", "oto39-3",
+  "oto40-0", "oto40-1", "oto40-2", "oto40-3",
+  "oto04-0", "oto04-1", "oto04-2", "oto04-3",
+  "oto05-0", "oto05-1", "oto05-2", "oto05-3",
+  "oto06-0", "oto06-1", "oto06-2", "oto06-3",
+  "oto07-0", "oto07-1", "oto07-2", "oto07-3",
+  "oto08-0", "oto08-1", "oto08-2", "oto08-3",
+  "oto09-0", "oto09-1", "oto09-2", "oto09-3"
+)
+# fix variable names, order list
+specimens <- setNames(testing[30:184], specimen.vars)
+specimens = specimens[order(names(specimens))]
+rm(specimen.vars)
+reference.vars <- c(
+"ATHO-1", "ATHO-2", "ATHO-3", "ATHO-4", "ATHO-5",
+"BM90-21-1", "BM90-21-2", "BM90-21-3", "BM90-21-4", "BM90-21-5",
+"NIST612-1", "NIST612-2", "NIST612-3", "NIST612-4",
+"G_NIST612-1", "G_NIST612-2", "G_NIST612-3", "G_NIST612-4", "G_NIST612-5",
+"NIST612-5","NIST612-6",
+"KL2-1", "KL2-2",
+"T1-1", "T1-2", "T1-3"
+)
+references <- setNames(testing[4:29], reference.vars)
+references = references[order(names(references))]
+ICP_MS <- c(testing[1:3],references,specimens)
+rm(reference.vars,references,specimens,testing)
+
+# remove blank rows, weird formatting in sheets
+library(tidyverse)
+library(hablar)
+testing1 <- ICP_MS
+for (i in 4:length(ICP_MS)){
+testing2 <- testing1[[i]]
+testing2 <- testing2[,-1]
+names <- as.vector(unlist(testing2[1,]))
+colnames(testing2) <- names
+testing2 <- testing2[-1,]
+testing1[[i]] <- retype(testing2,)
+}
+ICP_MS <- testing1
+rm(testing1,testing2,i,names)
+# saveRDS(ICP_MS, "RDS_dataframes/ICP-MS_clean.RDS")
+```
+
+# Make DF (no lists)
+
+```{r}
+ICP_MS <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+# 30 - 184 are otoliths
+df <- ICP_MS[c(30:184)]
+names(df)
+# no specimen 14
+# specimen 24 missing a third scan
+for(i in 1:155){
+  spec <- names(df[i])
+  df[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+  rm(spec,i)
+}
+df <- do.call("rbind", df)
+df <- rename(df, "time" = `Elapsed Time`)
+saveRDS(df, "RDS_dataframes/ICP-MS_df.RDS")
+rm(ICP_MS, df)
+```
+
+# Cutoff Data
+```{r}
+ICP_MS <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df <- readRDS("RDS_dataframes/ICP-MS_df.RDS")
+df <- df %>% replace(is.na(.), 0)
+cutoffs <- df %>% group_by(specimen,transect) %>% summarize(cutoff = mean(Ca43) * 0.9)
+
+# Merge the two data frames
+merged_df <- merge(df, cutoffs, by = c("specimen", "transect"))
+
+# Filter the merged data frame using subset
+filtered_df <- subset(merged_df, Ca43 > cutoff)
+saveRDS(filtered_df, "RDS_dataframes/ICP-MS_cutoffs_df.RDS")
+
+# Mg
+filtered_df %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_line(aes(x = time, y = Mg24_ppm)) + 
+  facet_wrap(~transect)
+# Mn
+filtered_df %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_line(aes(x = time, y = Mn55_ppm)) + 
+  facet_wrap(~transect)
+# Sr
+filtered_df %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_line(aes(x = time, y = Sr86_ppm)) + 
+  facet_wrap(~transect)
+filtered_df %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_line(aes(x = time, y = Sr87_ppm)) + 
+  facet_wrap(~transect)
+filtered_df %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_line(aes(x = time, y = Sr88_ppm)) + 
+  facet_wrap(~transect)
+```
+
+# elementR
+
+### Write specimen sheets to folder for elementR
+
+```{r}
+# ICP_MS <- readRDS("RDS_dataframes/ICP-MS_rawlist.RDS")
+library(writexl)
+# specimen 1-23, starts at index 30
+idx <- seq(from = 1, to = 88, by = 4)
+for (i in idx){
+  i = i + 29
+  path <- names(ICP_MS[i])
+  path <- str_sub(path, 1, str_length(path)-2)
+  write_xlsx(ICP_MS[c(i:(i+3))],paste0("ICP-MS/elementR/samples/",path,".xlsx"))
+}
+# specimen 24 missing a third scan
+write_xlsx(ICP_MS[c(118:120)],"ICP-MS/elementR/samples/oto24.xlsx")
+# 25-40
+idx <- seq(from = 92, to = 155, by = 4)
+for (i in idx){
+  i = i + 29
+  path <- names(ICP_MS[i])
+  path <- str_sub(path, 1, str_length(path)-2)
+  write_xlsx(ICP_MS[c(i:(i+3))],paste0("ICP-MS/elementR/samples/",path,".xlsx"))
+}
+
+```
+
+```{r}
+library(elementR)
+runElementR()
+# GOTTA FIGURE OUT WHAT THE STANDARDS SHOULD BE....!!!!!!!!
+```
+
+
+### Write reference materials to folder
+
+```{r}
+write_xlsx(ICP_MS[c(4:8)],"ICP-MS/elementR/standards/ATHO.xlsx")
+write_xlsx(ICP_MS[c(9:13)],"ICP-MS/elementR/standards/BM90-21.xlsx")
+write_xlsx(ICP_MS[c(14:18)],"ICP-MS/elementR/standards/G_NIST612.xlsx")
+write_xlsx(ICP_MS[c(19:20)],"ICP-MS/elementR/standards/KL2.xlsx")
+write_xlsx(ICP_MS[c(21:25)],"ICP-MS/elementR/standards/NIST612.xlsx")
+write_xlsx(ICP_MS[c(26:29)],"ICP-MS/elementR/standards/T1.xlsx")
+```
+
+### specimens data exploration
+
+```{r}
+ICP_MS <- readRDS("RDS_dataframes/ICP-MS_df.RDS")
+ICP_MS <- ICP_MS %>% replace(is.na(.), 0)
+
+
+
+testing <- ICP_MS %>% filter(Ca43 > 1000000)
+testing %>% group_by(transect) %>% filter(specimen == "oto01") %>% ggplot(aes(x = time, y = Mg24_ppm)) + 
+  geom_line() + 
+  facet_wrap(~transect, scale = "free")
+
+testing_longer <- testing %>% pivot_longer(-c(time, specimen, transect), names_to = "element", values_to = "value")
+testing_longer$element <- as.factor(testing_longer$element)
+testing_longer$specimen <- as.factor(testing_longer$specimen)
+
+testing_longer %>% group_by(transect) %>% filter(specimen == "oto01") %>% 
+  ggplot() + 
+  geom_line(aes(x = time, y = value)) + 
+  facet_wrap(~element,scales = "free")
+
+
+testing_longer %>% group_by(transect) %>% filter(specimen == "oto01") %>% ggplot() + 
+  geom_tile(aes(x = time, y = transect, color = value)) + 
+  scale_color_viridis_b()
+
+
+testing <- ICP_MS %>% filter(specimen == "oto01")
+ggplot(testing) + 
+  geom_line(aes(x = time, y = Ca43)) + 
+  geom_hline(yintercept = 1102300) + 
+  facet_grid(~transect, scale = "free")
+
+testing1 <- testing %>% filter(transect == 1)
+mean(testing1$Ca43)
+
+
+
+means <- testing %>% group_by(transect) %>% summarise(Ca43 = mean(Ca43))
+themean <- as.numeric(means[1,2])
+beginning <- testing %>% filter(time < 10)
+end <- testing %>% filter(time > 100)
+mod.beg <- lm(data = beginning, Ca43 ~ time)
+data.beg <- data.frame(time = seq(1,10,0.01))
+data.beg$preds <- round(predict(mod.beg,data.beg))
+idx.beg <- which.min(abs(data.beg$preds - themean))
+idx.beg <- data.beg[idx.beg,1]
+mod.end <- lm(data = end, Ca43 ~ time)
+data.end <- data.frame(time = seq(80,120,0.01))
+data.end$preds <- round(predict(mod.end,data.end))
+idx.end <- which.min(abs(data.end$preds - themean))
+idx.end <- data.end[idx.end,1]
+
+testing2 <- testing %>% filter(transect == 1, 
+                               time > idx.beg,
+                               time < idx.end)
+ggplot(testing2) + 
+  geom_line(aes(x = time, y = Ca43))
+
+ggplot(testing2) + 
+  geom_line(aes(x = time, y = Mn55_ppm))
+
+testing2_longer <- testing2 %>% pivot_longer(-c(time, specimen, transect), names_to = "element", values_to = "value")
+
+ggplot(testing2_longer) + 
+  geom_line(aes(x = time, y = value)) + 
+  facet_wrap(~element,scales = "free")
+
+
+testing1 <- testing %>% filter(time < 10)
+
+mod <- lm(data = testing1, Ca43 ~ time)
+
+
+ggplot(testing1,aes(x = time, y = Ca43)) + 
+  geom_line() + 
+  geom_smooth(method = "lm") +
+  geom_hline(yintercept = 1102300)
+```
+### Reference Data
+```{r}
+ICP_MS <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+#
+
+testing <- ICP_MS[[4]]
+testing <- retype(testing)
+testing$Specimen <- as.factor(testing$Specimen)
+testing$Otolith <- as.factor(testing$Otolith)
+# testing <- testing[37:268,]
+testing %>% filter(Otolith == "oto01")
+
+ggplot() +
+  geom_histogram(data = testing %>% filter(Otolith == "oto07"),aes(Li7_ppm_LOD_Longerich)) + 
+  geom_histogram(data = testing %>% filter(Otolith == "oto08"),aes(Li7_ppm_LOD_Longerich), fill = "red") + 
+  geom_histogram(data = testing %>% filter(Otolith == "oto09"),aes(Li7_ppm_LOD_Longerich), fill = "blue")
+
+
+ggplot(testing) +
+  geom_histogram(aes(Li7_ppm_LOD_Longerich, fill = Otolith))
+
+```
+
+
+```{r}
+library(tidyverse)
+ICP_MS <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+testing <- ICP_MS[30:33]
+testing$`oto01-0`$transect = as.factor(1)
+testing$`oto01-1`$transect = as.factor(2)
+testing$`oto01-2`$transect = as.factor(3)
+testing$`oto01-3`$transect = as.factor(4)
+testing3 <- bind_rows(testing$`oto01-0`,testing$`oto01-1`,testing$`oto01-2`,testing$`oto01-3`)
+
+testing3 <- testing3 %>% rename(time = `Elapsed Time`)
+naming <- names(testing3)
+colnames(testing3) <- as.character(naming)
+names(testing3)
+ggplot(testing3) +
+  geom_path(aes(x = time, y = Ca43))+
+  facet_wrap(~transect)
+```

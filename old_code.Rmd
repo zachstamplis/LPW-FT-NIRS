@@ -1282,3 +1282,28 @@ appraise(gam.select) & theme_stata() &
 
 ```
 
+
+# extract specimen numbers from rescans
+```{r, cache = T}
+testing1 <- cat(strings, "\n") # concatenates all filenames in a directory and adds a space delimiter
+
+
+
+list.files(path = "IBM_scans")
+
+
+
+strings <- list.files(path = "get_filename", )
+library(stringr)
+# Define the pattern to match
+pattern <- "(?<=JJ202101202_)\\d+(?=_.+)"
+# Use str_extract_all to extract matches from each string
+matches <- str_extract_all(strings, pattern)
+testing <- unlist(matches)
+# Convert the matches to a data frame for easier inspection
+df <- data.frame(numbers = unlist(matches))
+print(df)
+testing
+```
+
+
