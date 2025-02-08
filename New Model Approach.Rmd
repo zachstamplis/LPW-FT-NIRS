@@ -1,0 +1,389 @@
+I'm redoing my modelling approach a bit per Franz's suggestions.  The general approach will be: 
+- start with the entire dataframe (NO SPLIT) and pick the number of PC's I would like to use.
+- fit LM and GAM with PC's from the FULL dataset (MuMIn, dredge function)
+- choose subset of best models, up to 5? Pick an AIC cutoff for top models
+- Take these top models, THEN do my CV split
+- List all selected models and AIC from dredge function
+
+I will NOT be removing any outliers as of right now.
+
+```{r, results = 'hide', warning = F, message = F, cache = T}
+# Install packages not yet installed
+packages <- c("caret", "corrplot", "devtools", "dplyr", "gglm", "ggplot2", "gratia", "gridExtra", "knitr", "lubridate", "mdatools", "mgcv", "MuMIn", "opusreader2", "prospectr", "splitstackshape","shiny", "tidyr", "viridis")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  utils::install.packages(pkgs = packages[!installed_packages])
+}
+invisible(lapply(packages, library, character.only = TRUE)) # load all packages in list
+# install packages not on CRAN
+if (!require("remotes")) install.packages("remotes")
+if (!require("opusreader2")) {
+  remotes::install_github("spectral-cockpit/opusreader2")
+  library("opusreader2")
+}
+# if (!require("simplerspec")) {
+#   remotes::install_github("philipp-baumann/simplerspec")
+#   library("simplerspec")
+# }
+rm(installed_packages, packages) # remove objects from environment
+```
+
+```{r}
+scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+
+scan_avg_filter <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
+
+ggplot(scan_avg_filter, aes(x = length, y = read_age)) + 
+  geom_point() + 
+  geom_smooth(method = "lm")
+
+
+# PLS outliers (robust)
+outs <- c(52, 53, 57, 73, 94)
+# 59, 60, 61, 66, 
+scan_avg_filter <- scan_avg_filter %>%
+  dplyr::filter(!specimen %in% outs)
+
+####### Filter outliers that need to be reaged based on PCA results??
+
+scan_avg_filter <- scan_avg_filter %>%
+  dplyr::filter(specimen != 52, specimen != 53, specimen != 59, specimen != 65, specimen != 67, specimen != 70, specimen != 74, specimen != 85, specimen != 96)
+
+
+
+### filter based on low CV
+# 
+# scan_avg_filter <- scan_avg_filter %>%
+#   dplyr::filter(specimen != 21, specimen != 24, specimen != 26, specimen != 27, specimen != 31, specimen != 32, specimen != 37, specimen != 38, specimen != 40, specimen != 40, 
+#                 specimen != 44, specimen != 48, specimen != 50, specimen != 52, specimen != 54, specimen != 55, specimen != 61, specimen != 65, 
+#                 specimen != 68, specimen != 72, specimen != 73, specimen != 75, specimen != 79, specimen != 81, specimen != 82, specimen != 85, 
+#                 specimen != 96)
+
+
+```
+
+# 10 PCs, LM/GAM dredging with all samples
+```{r}
+pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
+plot(pca_temp)
+pc_df <- data.frame(PC1 = rep(0,nrow(scan_avg_filter)))
+for (i in 1:10) {
+  pc_df[, paste0("PC", i)] <- pca_temp$res$cal$scores[, i]
+  rm(i)
+}
+scan_avg_filter <- cbind(pc_df,scan_avg_filter)
+global_lm <- lm(read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = scan_avg_filter)
+global_gam <- gam(data = scan_avg_filter, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6) + s(PC7) + s(PC8) + s(PC9) + s(PC10))
+
+# dredge to find top 5 models
+options(na.action = "na.fail")
+dredge_lm <- dredge(global_lm)
+top5_lm <- get.models((dredge_lm), subset = 1:5)
+dredge_gam <- dredge(global_gam)
+top5_gam <- get.models(dredge_gam, subset = 1:5)
+terms_lm <- list()
+terms_gam <- list()
+for(i in 1:5){
+  terms_lm[[i]] <- top5_lm[[i]]$terms
+  terms_gam[[i]] <- top5_gam[[i]]$formula
+  rm(i)
+}
+rm(global_gam, global_lm, top5_gam, top5_lm, pc_df, pca_temp)
+scan_avg_filter <- scan_avg_filter[,-c(1:10)]
+```
+
+# 10-fold split
+
+```{r message=FALSE, echo = T, results = 'hide', cache=TRUE}
+# 10 fold CV split - create folds
+set.seed(6)
+splits <- caret::createFolds(scan_avg_filter$read_age, k = 10, list = TRUE, returnTrain = FALSE)
+# extract PC's for each calibration set, create test sets with ages and spectra
+cal <- list()
+test <- list()
+for (i in 1:10) {
+  # calibration set and PC's
+  pc.mod <- preProcess(scan_avg_filter[-splits[[i]], -c(1:20)], method = "pca", thresh = 0.95, pcaComp = 10)
+  pc.cal <- predict(pc.mod, scan_avg_filter[-splits[[i]], -c(1:20)])
+  pc.cal <- cbind(pc.cal, scan_avg_filter[-splits[[i]], ])
+  cal[[i]] <- pc.cal
+  rm(pc.cal)
+  # test sets
+  pc.test <- predict(pc.mod, scan_avg_filter[splits[[i]], -c(1:20)])
+  pc.test <- cbind(pc.test, scan_avg_filter[splits[[i]], ])
+  test[[i]] <- pc.test
+  rm(pc.test, pc.mod, i)
+}
+```
+
+# LM - top 5 models
+
+```{r message=FALSE, cache=TRUE}
+mods.lm <- replicate(10, list())
+r2_lm <- list()
+rmse_lm <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  r2_temp <- rep(0, 5)
+  rmse_temp <- rep(0, 5)
+  for (j in 1:5) {
+    mod <- lm(data = calibrate, terms_lm[[j]])
+    preds <- predict(mod, newdata = testing)
+    rmse_temp[j] <- caret::RMSE(pred = preds, obs = testing[, "read_age"])
+    RSS <- sum((testing$read_age - preds)^2)
+    TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+    r2_temp[j] <- 1 - (RSS / TSS)
+    mods.lm[[i]][[j]] <- mod
+    rm(RSS, TSS, preds)
+  }
+  r2_lm[[i]] <- data.frame(Model = paste0("Linear ", 1:5), r2 = r2_temp)
+  rmse_lm[[i]] <- data.frame(Model = paste0("Linear ", 1:5), rmse = rmse_temp)
+  rm(mod, i, j, r2_temp, rmse_temp, calibrate, testing)
+}
+# Unlist the r2 & rmse values and calc means for 10 splits, combine into dataframe
+r2_lm <- sapply(r2_lm, "[[", "r2")
+r2_lm <- rowMeans(r2_lm)
+rmse_lm <- sapply(rmse_lm, "[[", "rmse")
+rmse_lm <- rowMeans(rmse_lm)
+(lm_result <- data.frame(
+  Model = paste0("Linear ", 1:5),
+  Mean_R2 = r2_lm,
+  Mean_RMSE = rmse_lm
+))
+rm(r2_lm, rmse_lm)
+```
+
+# GAM - top 5 models
+
+```{r}
+mods.gam <- replicate(10, list())
+r2_gam <- list()
+rmse_gam <- list()
+for (i in 1:10) {
+  calibrate <- cal[[i]]
+  testing <- test[[i]]
+  r2_temp <- rep(0, 5)
+  rmse_temp <- rep(0, 5)
+  for (j in 1:5) {
+    mod <- gam(data = calibrate, terms_gam[[j]])
+    preds <- predict(mod, newdata = testing)
+    rmse_temp[j] <- caret::RMSE(pred = preds, obs = testing[, "read_age"])
+    RSS <- sum((testing$read_age - preds)^2)
+    TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+    r2_temp[j] <- 1 - (RSS / TSS)
+    mods.gam[[i]][[j]] <- mod
+    rm(RSS, TSS, preds)
+  }
+  r2_gam[[i]] <- data.frame(Model = paste0("GAM ", 1:5), r2 = r2_temp)
+  rmse_gam[[i]] <- data.frame(Model = paste0("GAM ", 1:5), rmse = rmse_temp)
+  rm(j, i, testing, calibrate, mod, r2_temp, rmse_temp)
+}
+r2_gam <- sapply(r2_gam, "[[", "r2")
+r2_gam <- rowMeans(r2_gam)
+rmse_gam <- sapply(rmse_gam, "[[", "rmse")
+rmse_gam <- rowMeans(rmse_gam)
+gam_result <- data.frame(
+  Model = paste0("GAM ", 1:5),
+  Mean_R2 = r2_gam,
+  Mean_RMSE = rmse_gam
+)
+(results <- rbind(lm_result,gam_result))
+rm(r2_gam, rmse_gam, lm_result, gam_result)
+```
+
+# PLS models
+
+```{r}
+mods.pls <- list()
+mods.vip <- list()
+r2.pls <- list()
+rmse.pls <- list()
+for (i in 1:10) {
+  calibrate <- scan_avg_filter[-splits[[i]], ]
+  testing <- scan_avg_filter[splits[[i]], ]
+  mod <- pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
+    scale = F, center = T, cv = 1, #ncomp.selcrit = "wold", removing for now, seems too conservative with number of selected components?
+    info = "Age Prediction Model",
+    x.test = testing[, 31:ncol(testing)],
+    y.test = testing[, "read_age"]
+  )
+  ncomp <- mod$ncomp.selected
+  rmse.pls$pls.test[i] <- mod$testres$rmse[[ncomp]] # extract rmse
+  r2.pls$pls.test[i] <- mod$testres$r2[[ncomp]] # extract r2
+  mods.pls[[i]] <- mod
+  mods.pls[[1]]$ncomp.selected
+  vip <- as.data.frame(vipscores(mod))
+  mod <- pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
+    ncomp.selcrit = "wold", scale = F, center = T, cv = 1,
+    info = "Age Prediction Model",
+    x.test = testing[, 31:ncol(testing)],
+    y.test = testing[, "read_age"],
+    exclcols = vip$V1 < .5
+  )
+  ncomp <- mod$ncomp.selected
+  r2.pls$vip.test[i] <- mod$testres$r2[[ncomp]] # extract r2
+  mods.vip[[i]] <- mod
+  rmse.pls$vip.test[i] <- mod$testres$rmse[[ncomp]] # extract rmse
+  rm(calibrate, mod, ncomp, testing, i, vip)
+}
+(results <- rbind(results, 
+                 c("PLS", mean(r2.pls$pls.test), mean(rmse.pls$pls.test)),
+                 c("VIP", mean(r2.pls$vip.test), mean(rmse.pls$vip.test))
+))
+rm(rmse.pls, r2.pls)
+```
+
+# PLS look for outliers
+```{r}
+
+m <- mods.pls[[5]]
+
+plotPredictions(m$res$cal, ncomp = 2, show.stat = TRUE)
+# Get residuals
+residuals <- pls_model$residuals
+
+# Plot residuals
+plotResiduals(pls_model, show.labels = TRUE)
+
+plotResiduals(m$res$cal, show.labels = TRUE)
+
+plotScores(m, c(1, 3), show.labels = TRUE)
+
+plotPredictions(m$res$cal, ncomp = 2, show.stat = TRUE)
+```
+
+# Random code I don't want to lose
+
+```{r}
+# find specimens with worst predictions using PLS
+
+mod <- pls(scan_avg_filter[, 21:ncol(scan_avg_filter)], scan_avg_filter[, "read_age"],
+    scale = F, center = T, cv = 1,
+    info = "Age Prediction Model"
+  )
+plot(mod)
+
+plotXYResiduals(mod, show.labels = TRUE, labels = "specimen")
+
+mod2 = setDistanceLimits(mod, lim.type = "ddrobust")
+plotXYResiduals(mod2, show.labels = TRUE, labels = "specimen")
+
+plot(m)
+plot()
+p = plotScores(m$res$cal)
+plotHotellingEllipse(m,conf.lim = .05)
+plotXResiduals(m, 3)
+plotXResiduals(m, ncomp = 3, log = TRUE)
+
+plotYResiduals(m, 3)
+plotYResiduals(m$res$cal)
+plot(m$res$cal$ydecomp)
+m$res$cal$ydecomp$Q
+
+library(plotly)
+ggplotly(
+  ggplot() +
+    geom_point(data = scan_avg_filter,
+               aes(x = PC1, y = PC2, color = read_age), size = 5) + 
+    scale_color_viridis(option =  "plasma")
+)
+
+ggplotly(
+  ggplot() +
+    geom_point(data = scan_avg_filter,
+               aes(x = PC1, y = PC2, color = structure_weight), size = 5) + 
+    scale_color_viridis(option =  "plasma")
+)
+
+
+ggplotly(
+  ggplot() +
+    geom_point(data = scan_avg_filter,
+               aes(x = PC1, y = PC2, color = length), size = 5) + 
+    scale_color_viridis(option =  "plasma")
+)
+
+
+# ONES TO LOOK AT, high T2 loadings
+
+c(53, 
+  95(maybe 94?), 
+  27, 
+  74 (73 maybe), 
+  57, 
+  94 (93?), 
+  78 (77?))
+
+
+
+
+scan_avg_filter_1 <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
+pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
+scan_avg_filter_1$PC1 <- pca_temp$res$cal$scores[, 1]
+scan_avg_filter_1$PC2 <- pca_temp$res$cal$scores[, 2]
+rm(pca_temp)
+# library(plotly)
+
+ggplotly(
+  ggplot() +
+    geom_point(data = scan_avg_filter_1,
+               aes(x = PC1, y = PC2, color = read_age), size = 5
+    ) + 
+    scale_color_viridis() +
+    geom_point()
+)
+# weird ones include read_age 135 spec 52 ,, ______ 208 spec 96 , 210 (spec 85, HIGH CV, REMOVE FOR NOW), 
+# 148 (spec 70, image corrupted, remove, cannot reage for now, hatch date LATE), CAN REMOVE 135, spec 52 
+
+
+
+# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP) REMOVE 
+# 148 (spec 65, remove????)
+# 
+# 
+# 164 - spec 67, small length outlier...!????
+# 188 - spec 74, aging is all over the place, remove....
+# 175 spec 53, LARGE SPECIMEN SO MAYBE OUTLIER?????
+
+
+
+
+
+
+
+
+
+
+
+9 53 57 68 70 73
+
+
+# weird ones include read_age 135 spec 52, 208 spec 96 , 210 spec 85, 148 spec 70, 175 spec 53, 164 - spec 67, 188 - spec 74, # 147 (spec 59, 148 (spec 65
+
+
+
+# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP) REMOVE 
+# 148 (spec 65, remove????)
+# 
+# 
+# 164 - spec 67, small length outlier...!????
+# 188 - spec 74, aging is all over the place, remove....
+# 175 spec 53, LARGE SPECIMEN SO MAYBE OUTLIER?????
+
+
+
+
+
+
+
+# weird ones include read_age 135 spec 52 ,, ______ 208 spec 96 , 210 (spec 85, HIGH CV, REMOVE FOR NOW), 
+# 148 (spec 70, image corrupted, remove, cannot reage for now, hatch date LATE), CAN REMOVE 135, spec 52 
+# 
+
+
+# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP)
+# (spec 96, really small CV, keep)
+# (175, spec 53 seems ok), , 
+```
+

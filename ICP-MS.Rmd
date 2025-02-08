@@ -128,6 +128,50 @@ saveRDS(df, "RDS_dataframes/ICP-MS_df.RDS")
 rm(ICP_MS, df)
 ```
 
+# filter roughly using Cu65, create determine mean and medium values for each transect/specimen
+
+```{r}
+df <- readRDS("RDS_dataframes/ICP-MS_df.RDS")
+df <- df %>% replace(is.na(.), 0)
+df <- df %>% filter(Cu65_ppm <= 5, Cu65_ppm > 0) 
+# split each transect into thirds
+df <- df %>% 
+  group_by(specimen, transect) %>%
+  mutate(portion = cut(time, breaks = 3, labels = c("Start", "Middle", "End"), include.lowest = TRUE))
+# mean and median for all transects/thirds
+spec_stats <- df %>% group_by(specimen, transect, portion) %>% summarise(across(c(Ca43:Th232_ppm), list(mean = ~mean(.x, na.rm = TRUE), median = ~median(.x, na.rm = TRUE))))
+# combine transects, summary statistics for each specimen by third
+spec_stats <- spec_stats %>% group_by(specimen, portion) %>% 
+  summarise(across(c(Ca43_mean:Th232_ppm_median), ~mean(.x)))
+
+# ggplot look at splits for all specimens; focus on Mg, Mn, Zn, 
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Mg24_ppm_median, color = portion))
+
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Mn55_ppm_median, color = portion))
+
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Zn66_ppm_median, color = portion))
+
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Sr86_ppm_median, color = portion))
+
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Sr87_ppm_median, color = portion))
+
+ggplot(spec_stats) +
+  geom_point(aes(y = specimen, x = Sr88_ppm_median, color = portion))
+
+# tukey to test differences
+anova_result <- aov(Mg24_ppm_median ~ portion, data = spec_stats)
+TukeyHSD(anova_result)
+
+
+
+
+```
+
 # Cutoff Data
 ```{r}
 ICP_MS <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
@@ -214,7 +258,7 @@ write_xlsx(ICP_MS[c(26:29)],"ICP-MS/elementR/standards/T1.xlsx")
 ICP_MS <- readRDS("RDS_dataframes/ICP-MS_df.RDS")
 ICP_MS <- ICP_MS %>% replace(is.na(.), 0)
 
-
+test <- ICP_MS[[30]]
 
 testing <- ICP_MS %>% filter(Ca43 > 1000000)
 testing %>% group_by(transect) %>% filter(specimen == "oto01") %>% ggplot(aes(x = time, y = Mg24_ppm)) + 

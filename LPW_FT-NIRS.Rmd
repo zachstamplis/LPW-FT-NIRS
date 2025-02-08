@@ -352,7 +352,7 @@ rm(scan_avg)
 ```{r}
 # dfmeta_LPW <- readRDS("RDS_dataframes/LPW_dfmeta.RDS")
 # scan_avg <- readRDS("RDS_dataframes/LPW_scan_avg_unproc.RDS")
-# scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter")
+scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 ```
 
 # Model Age - FT-NIRS
