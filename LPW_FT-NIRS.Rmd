@@ -73,12 +73,25 @@ levels(as.factor(as.character(meta_LPW$session_title))) # set session_title to f
 meta_LPW <- meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths", "NIR_LPW202001202_otoliths_rescan_1", "NIR_LPW202001202_otoliths_rescan_2", "NIR_LPW202001202_otoliths_rescan_3"), ]
 meta_LPW$specimen[meta_LPW$file_name == ""] # check for missing file_names in metadata
 meta_LPW <- meta_LPW[meta_LPW$file_name != "", ] # remove any rows that are missing a file_name in the metadata
+
 # check number of specimens for each scan session (122 specimens, 365 total scans after excluding specimen 66, scan 1)
 nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths"), ])
 nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_1"), ])
 nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_2"), ])
 nrow(meta_LPW[meta_LPW$session_title %in% c("NIR_LPW202001202_otoliths_rescan_3"), ])
+
+# fix dates, report as julian date, calculate expected hatch date
 meta_LPW$sample_date <- lubridate::as_date(mdy(meta_LPW$sample_date)) # convert sample date to lubridate format
+meta_LPW$hatch_date <- meta_LPW$sample_date - days(meta_LPW$read_age) # create hatch date estimate
+meta_LPW$sample_date <- as.POSIXlt(meta_LPW$sample_date, format = "%y/%m/%d")$yday # convert to julian day
+meta_LPW$hatch_date <- as.POSIXlt(meta_LPW$hatch_date, format = "%y/%m/%d")$yday # convert to julian day
+
+# calc expected age per sample date
+temp <- meta_LPW %>% dplyr::filter(sample_date == 215, !is.na(read_age))
+age <- round(mean(temp$read_age))
+meta_LPW$expected_age <- age + (meta_LPW$sample_date - 215)
+rm(temp, age)
+
 # generate file paths to import with Opusreader
 meta_LPW$file_path <- paste0(getwd(), "/FT-NIRS_spectra/LPW_scans/", meta_LPW$file_name) # generate filepaths for all .0 files
 Opusfiles <- as.vector(meta_LPW$file_path) # store filepaths in object
@@ -164,7 +177,9 @@ colnames(dfmeta_LPW) <- as.character(colnames(dfmeta_LPW)) # make sure column na
 dfmeta_longLPW <- pivot_longer(dfmeta_LPW, cols = -c(1:20)) # pivot absorbance measurements to long format for easy plotting
 dfmeta_longLPW <- dfmeta_longLPW %>% rename(., "wavenumber" = "name") # rename name column to wavenumber for clarification
 dfmeta_longLPW$wavenumber <- as.numeric(as.character(dfmeta_longLPW$wavenumber)) # change class of wavenumber variable to a numeric
-# Plot 7 specimens to see if data loaded properly.
+
+# Save RDS for data transparency and easily enable others to work with dataframe without all these complicated import steps
+saveRDS(dfmeta_LPW, "RDS_dataframes/LPW_dfmeta.RDS")
 ```
 
 ### Plot check
@@ -191,8 +206,6 @@ ggplot() +
     axis.line = element_line(colour = "black")
   ) +
   facet_wrap(~specimen)
-# Save RDS for data transparency and easily enable others to work with dataframe without all these complicated import steps
-# saveRDS(dfmeta_LPW, "RDS_dataframes/LPW_dfmeta.RDS")
 ```
 
 # Exploratory Analysis
@@ -339,12 +352,17 @@ scan_4 <- dfmeta_LPW %>% dplyr::filter(run_number == 4)
 scan_avg <- bind_cols(NULL, scan_2[, 1:20])
 scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(scan_3)] + scan_4[, 21:ncol(scan_4)]) / 3)
 rm(scan_2, scan_3, scan_4, dfmeta_LPW)
-# saveRDS(scan_avg, "RDS_dataframes/LPW_scan_avg_unproc.RDS")
+saveRDS(scan_avg, "RDS_dataframes/LPW_scan_avg_unproc.RDS")
+
 # preprocess
-scan_avg_filter <- cbind(scan_avg[, c(1:20)], savitzkyGolay(scan_avg[, 21:length(scan_avg)], m = 1, p = 3, w = 17))
-scan_avg_filter <- scan_avg_filter[, -c(21:517)] # removing the noisy stretch of spectra (>7500, up to 7504)
-rm(scan_avg)
-# saveRDS(scan_avg_filter, "RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+scan_avg_proc <- cbind(scan_avg[, c(1:20)], savitzkyGolay(scan_avg[, 21:length(scan_avg)], m = 1, p = 3, w = 17))
+saveRDS(scan_avg_proc, "RDS_dataframes/LPW_scan_avg_proc.RDS")
+
+# filter "noisy stretch of spectra"
+scan_avg_filter <- scan_avg_proc[, -c(21:517)] # removing the noisy stretch of spectra (>7500, up to 7504)
+
+saveRDS(scan_avg_filter, "RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+rm(scan_avg, scan_avg_proc, scan_avg_filter)
 ```
 
 ## RDS files
@@ -352,7 +370,8 @@ rm(scan_avg)
 ```{r}
 # dfmeta_LPW <- readRDS("RDS_dataframes/LPW_dfmeta.RDS")
 # scan_avg <- readRDS("RDS_dataframes/LPW_scan_avg_unproc.RDS")
-scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+# scan_avg_proc <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+# scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 ```
 
 # Model Age - FT-NIRS
@@ -361,25 +380,35 @@ scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 
 #### First 2 PC's, colored by age
 ```{r, cache = T}
+scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 scan_avg_filter <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
 pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
 scan_avg_filter$PC1 <- pca_temp$res$cal$scores[, 1]
 scan_avg_filter$PC2 <- pca_temp$res$cal$scores[, 2]
 rm(pca_temp)
-rm_specimens <- c("24", "52", "53", "59", "65", "67", "74")
-library(plotly)
-ggplotly(
-  ggplot() +
-    geom_point(data = scan_avg_filter[!c(scan_avg_filter$specimen %in% rm_specimens), ],
-               aes(x = PC1, y = PC2, color = read_age), size = 5
-    ) +
-    geom_point(data = scan_avg_filter[c(scan_avg_filter$specimen %in% rm_specimens), ],
-               aes(x = PC1, y = PC2, color = read_age), shape = 17, size = 7
-    ) +
-    scale_color_viridis() +
-    geom_point()
-)
-rm(rm_specimens)
+
+plotly::ggplotly(
+  ggplot(data = scan_avg_filter, aes(x = PC1, y = PC2, label = specimen, color = read_age)) +
+    geom_point(size = 3) + 
+    scale_color_viridis())
+
+plotly::ggplotly(
+  ggplot(data = scan_avg_filter, aes(x = specimen, y = read_age, label = specimen, color = structure_weight)) +
+    geom_point(size = 3) + 
+    scale_color_viridis() + 
+  geom_smooth(method = "lm"))
+
+plotly::ggplotly(
+  ggplot(data = scan_avg_filter, aes(x = length, y = structure_weight, label = specimen, color = read_age)) +
+    geom_point(size = 3) + 
+    scale_color_viridis() + 
+  geom_smooth(method = "lm"))
+
+plotly::ggplotly(
+  ggplot(data = scan_avg_filter, aes(x = structure_weight, y = read_age, label = specimen, color = length)) +
+    geom_point(size = 3) + 
+    scale_color_viridis() + 
+  geom_smooth(method = "lm"))
 ```
 
 #### Removing above identified outliers

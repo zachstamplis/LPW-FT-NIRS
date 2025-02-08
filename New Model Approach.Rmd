@@ -1,11 +1,10 @@
 I'm redoing my modelling approach a bit per Franz's suggestions.  The general approach will be: 
-- start with the entire dataframe (NO SPLIT) and pick the number of PC's I would like to use.
-- fit LM and GAM with PC's from the FULL dataset (MuMIn, dredge function)
-- choose subset of best models, up to 5? Pick an AIC cutoff for top models
-- Take these top models, THEN do my CV split
+- start with the entire dataframe (no splits) and pick the number of PC's I would like to use. ~10 for LM and maybe less for GAM
+- fit LM and GAM with PC's from the full dataset (MuMIn, dredge function)
+- choose subset of best models, up to 5.
+- 10-fold CV and evaluate top 5 models from each approach
 - List all selected models and AIC from dredge function
 
-I will NOT be removing any outliers as of right now.
 
 ```{r, results = 'hide', warning = F, message = F, cache = T}
 # Install packages not yet installed
@@ -28,52 +27,38 @@ if (!require("opusreader2")) {
 rm(installed_packages, packages) # remove objects from environment
 ```
 
+# Load dataframe
+I'm trying to decide whether to cutoff the wavenumbers >7500 since this region is relatively "noisy".  After some investigating I may opt to include this region as my models tend to fit a bit better.  Preprocessing tweaks don't seem to be making a huge different so opting for Matta et al's 1,3,17 for SG filter.
 ```{r}
-scan_avg_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+# cut off >7500 wavenumber
+df_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 
-scan_avg_filter <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
+# ALL waves
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 
-ggplot(scan_avg_filter, aes(x = length, y = read_age)) + 
-  geom_point() + 
-  geom_smooth(method = "lm")
-
-
-# PLS outliers (robust)
-outs <- c(52, 53, 57, 73, 94)
-# 59, 60, 61, 66, 
-scan_avg_filter <- scan_avg_filter %>%
-  dplyr::filter(!specimen %in% outs)
-
-####### Filter outliers that need to be reaged based on PCA results??
-
-scan_avg_filter <- scan_avg_filter %>%
-  dplyr::filter(specimen != 52, specimen != 53, specimen != 59, specimen != 65, specimen != 67, specimen != 70, specimen != 74, specimen != 85, specimen != 96)
-
-
-
-### filter based on low CV
-# 
-# scan_avg_filter <- scan_avg_filter %>%
-#   dplyr::filter(specimen != 21, specimen != 24, specimen != 26, specimen != 27, specimen != 31, specimen != 32, specimen != 37, specimen != 38, specimen != 40, specimen != 40, 
-#                 specimen != 44, specimen != 48, specimen != 50, specimen != 52, specimen != 54, specimen != 55, specimen != 61, specimen != 65, 
-#                 specimen != 68, specimen != 72, specimen != 73, specimen != 75, specimen != 79, specimen != 81, specimen != 82, specimen != 85, 
-#                 specimen != 96)
-
-
+# adjust preprocessing?
+# df <- readRDS("RDS_dataframes/LPW_scan_avg_unproc.RDS")
+# df <- cbind(df[, c(1:20)], savitzkyGolay(df[, 21:length(df)], m = 1, p = 3, w = 17))
 ```
 
 # 10 PCs, LM/GAM dredging with all samples
+
+I've been trying to decide whether I want to select the best models based on PCA of spectra from ALL specimens (including those that are unaged), or only PCA's based on aged specimens.  I've played around with both and it appears that model selecting with only aged specimens may be performing slightly better. 
+
+I had to reduce the number of PC's in my GAMs models to improve overall fit.  R2 values with 10 PCs were all over the place (large and/or negative), and fit seems to be better around 6 overall PC's for the dredge function.
 ```{r}
-pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
-plot(pca_temp)
-pc_df <- data.frame(PC1 = rep(0,nrow(scan_avg_filter)))
+# unfiltered spectra
+# remove unaged specimens before calculating PCs
+df <- df[complete.cases(df$read_age), ] 
+pca_temp <- pca(df[, 21:ncol(df), ])
+pc_df <- data.frame(PC1 = rep(0,nrow(df)))
 for (i in 1:10) {
   pc_df[, paste0("PC", i)] <- pca_temp$res$cal$scores[, i]
   rm(i)
 }
-scan_avg_filter <- cbind(pc_df,scan_avg_filter)
-global_lm <- lm(read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = scan_avg_filter)
-global_gam <- gam(data = scan_avg_filter, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6) + s(PC7) + s(PC8) + s(PC9) + s(PC10))
+pc_df <- cbind(pc_df,df) 
+global_lm <- lm(data = pc_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
+global_gam <- gam(data = pc_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6)) # adding too many PC's makes GAM have horrible fit and R2
 
 # dredge to find top 5 models
 options(na.action = "na.fail")
@@ -88,29 +73,54 @@ for(i in 1:5){
   terms_gam[[i]] <- top5_gam[[i]]$formula
   rm(i)
 }
-rm(global_gam, global_lm, top5_gam, top5_lm, pc_df, pca_temp)
-scan_avg_filter <- scan_avg_filter[,-c(1:10)]
+
+# filter wavenumbers >7500
+df_filter <- df_filter[complete.cases(df_filter$read_age), ] 
+pca_filter_temp <- pca(df_filter[, 21:ncol(df_filter), ])
+pc_filter_df <- data.frame(PC1 = rep(0,nrow(df_filter)))
+for (i in 1:10) {
+  pc_filter_df[, paste0("PC", i)] <- pca_filter_temp$res$cal$scores[, i]
+  rm(i)
+}
+pc_filter_df <- cbind(pc_filter_df,df_filter) 
+global_lm_filter <- lm(data = pc_filter_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
+global_gam_filter <- gam(data = pc_filter_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6))
+dredge_lm_filter <- dredge(global_lm_filter)
+dredge_gam_filter <- dredge(global_gam_filter)
+
+# report differences in models selected
+print("top 5 lm models all wavenumbers")
+dredge_lm[1:5,]
+print("top 5 lm models wavenumbers < 7500")
+dredge_lm_filter[1:5,]
+print("top 5 gam models all wavenumbers")
+dredge_gam[1:5,]
+print("top 5 gam models wavenumbers < 7500")
+dredge_gam_filter[1:5,]
+
+rm(global_gam, global_lm, top5_gam, top5_lm, pc_df, pca_temp, global_gam_filter, global_lm_filter, pc_filter_df, pca_filter_temp)
+rm(dredge_gam, dredge_gam_filter, dredge_lm, dredge_lm_filter)
 ```
 
 # 10-fold split
 
-```{r message=FALSE, echo = T, results = 'hide', cache=TRUE}
+```{r message=FALSE, echo = T, results = 'hide'}
 # 10 fold CV split - create folds
 set.seed(6)
-splits <- caret::createFolds(scan_avg_filter$read_age, k = 10, list = TRUE, returnTrain = FALSE)
+splits <- caret::createFolds(df$read_age, k = 10, list = TRUE, returnTrain = FALSE)
 # extract PC's for each calibration set, create test sets with ages and spectra
 cal <- list()
 test <- list()
 for (i in 1:10) {
   # calibration set and PC's
-  pc.mod <- preProcess(scan_avg_filter[-splits[[i]], -c(1:20)], method = "pca", thresh = 0.95, pcaComp = 10)
-  pc.cal <- predict(pc.mod, scan_avg_filter[-splits[[i]], -c(1:20)])
-  pc.cal <- cbind(pc.cal, scan_avg_filter[-splits[[i]], ])
+  pc.mod <- preProcess(df[-splits[[i]], -c(1:20)], method = c("pca","center"), pcaComp = 10)
+  pc.cal <- predict(pc.mod, df[-splits[[i]], -c(1:20)])
+  pc.cal <- cbind(pc.cal, df[-splits[[i]], ])
   cal[[i]] <- pc.cal
   rm(pc.cal)
   # test sets
-  pc.test <- predict(pc.mod, scan_avg_filter[splits[[i]], -c(1:20)])
-  pc.test <- cbind(pc.test, scan_avg_filter[splits[[i]], ])
+  pc.test <- predict(pc.mod, df[splits[[i]], -c(1:20)])
+  pc.test <- cbind(pc.test, df[splits[[i]], ])
   test[[i]] <- pc.test
   rm(pc.test, pc.mod, i)
 }
@@ -118,7 +128,7 @@ for (i in 1:10) {
 
 # LM - top 5 models
 
-```{r message=FALSE, cache=TRUE}
+```{r message=FALSE}
 mods.lm <- replicate(10, list())
 r2_lm <- list()
 rmse_lm <- list()
@@ -193,17 +203,17 @@ rm(r2_gam, rmse_gam, lm_result, gam_result)
 ```
 
 # PLS models
-
+VIP scores to filter wavenumbers seems to always make model fit more poorly; likely will NOT be using.
 ```{r}
 mods.pls <- list()
 mods.vip <- list()
 r2.pls <- list()
 rmse.pls <- list()
 for (i in 1:10) {
-  calibrate <- scan_avg_filter[-splits[[i]], ]
-  testing <- scan_avg_filter[splits[[i]], ]
+  calibrate <- df[-splits[[i]], ]
+  testing <- df[splits[[i]], ]
   mod <- pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
-    scale = F, center = T, cv = 1, #ncomp.selcrit = "wold", removing for now, seems too conservative with number of selected components?
+    scale = F, center = T, cv = 1, #ncomp.selcrit = "wold", removing for now, seems too conservative with number of selected components
     info = "Age Prediction Model",
     x.test = testing[, 31:ncol(testing)],
     y.test = testing[, "read_age"]
@@ -211,15 +221,18 @@ for (i in 1:10) {
   ncomp <- mod$ncomp.selected
   rmse.pls$pls.test[i] <- mod$testres$rmse[[ncomp]] # extract rmse
   r2.pls$pls.test[i] <- mod$testres$r2[[ncomp]] # extract r2
+  
+  # VIP filter of wavenumbers
   mods.pls[[i]] <- mod
   mods.pls[[1]]$ncomp.selected
   vip <- as.data.frame(vipscores(mod))
   mod <- pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
-    ncomp.selcrit = "wold", scale = F, center = T, cv = 1,
+    # ncomp.selcrit = "wold", 
+    scale = F, center = T, cv = 1,
     info = "Age Prediction Model",
     x.test = testing[, 31:ncol(testing)],
     y.test = testing[, "read_age"],
-    exclcols = vip$V1 < .5
+    exclcols = vip$V1 < 0.5
   )
   ncomp <- mod$ncomp.selected
   r2.pls$vip.test[i] <- mod$testres$r2[[ncomp]] # extract r2
@@ -234,156 +247,92 @@ for (i in 1:10) {
 rm(rmse.pls, r2.pls)
 ```
 
-# PLS look for outliers
-```{r}
-
-m <- mods.pls[[5]]
-
-plotPredictions(m$res$cal, ncomp = 2, show.stat = TRUE)
-# Get residuals
-residuals <- pls_model$residuals
-
-# Plot residuals
-plotResiduals(pls_model, show.labels = TRUE)
-
-plotResiduals(m$res$cal, show.labels = TRUE)
-
-plotScores(m, c(1, 3), show.labels = TRUE)
-
-plotPredictions(m$res$cal, ncomp = 2, show.stat = TRUE)
-```
-
-# Random code I don't want to lose
+# Look for potential outliers
 
 ```{r}
-# find specimens with worst predictions using PLS
-
-mod <- pls(scan_avg_filter[, 21:ncol(scan_avg_filter)], scan_avg_filter[, "read_age"],
-    scale = F, center = T, cv = 1,
-    info = "Age Prediction Model"
-  )
-plot(mod)
-
-plotXYResiduals(mod, show.labels = TRUE, labels = "specimen")
-
-mod2 = setDistanceLimits(mod, lim.type = "ddrobust")
-plotXYResiduals(mod2, show.labels = TRUE, labels = "specimen")
-
-plot(m)
-plot()
-p = plotScores(m$res$cal)
-plotHotellingEllipse(m,conf.lim = .05)
-plotXResiduals(m, 3)
-plotXResiduals(m, ncomp = 3, log = TRUE)
-
-plotYResiduals(m, 3)
-plotYResiduals(m$res$cal)
-plot(m$res$cal$ydecomp)
-m$res$cal$ydecomp$Q
-
-library(plotly)
-ggplotly(
-  ggplot() +
-    geom_point(data = scan_avg_filter,
-               aes(x = PC1, y = PC2, color = read_age), size = 5) + 
-    scale_color_viridis(option =  "plasma")
-)
-
-ggplotly(
-  ggplot() +
-    geom_point(data = scan_avg_filter,
-               aes(x = PC1, y = PC2, color = structure_weight), size = 5) + 
-    scale_color_viridis(option =  "plasma")
-)
-
-
-ggplotly(
-  ggplot() +
-    geom_point(data = scan_avg_filter,
-               aes(x = PC1, y = PC2, color = length), size = 5) + 
-    scale_color_viridis(option =  "plasma")
-)
+# find outliers based on length and age - >2 SD
+model <- lm(read_age ~ length, data = df)
+df.temp <- df %>%
+    mutate(residuals = resid(model))
+residual_threshold <- 2 * sd(df.temp$residuals)
+df.temp <- df.temp %>%
+    mutate(outlier = ifelse(abs(residuals) > residual_threshold, TRUE, FALSE))
+df.temp %>%
+    ggplot(aes(x = length, y = read_age)) +
+    geom_smooth(color = "#003d5b", 
+                method = "lm", 
+                se = FALSE,
+                size = 3,
+                alpha = 0.2) +
+    geom_point(aes(color = outlier), 
+               size = 4, 
+               alpha = 0.6,
+               ) + 
+    scale_color_manual(values = c("FALSE" = "#00798c", 
+                                  "TRUE" = "#c1121f")) +
+    ggrepel::geom_label_repel(
+      data = filter(df.temp, outlier),
+      aes(label = specimen),
+      size = 3, 
+      nudge_x = 0.1, 
+      nudge_y = 0.1, 
+      color = "#c1121f"
+    ) +
+    theme_minimal() + 
+    labs(title = "length vs age",
+         x = "length",
+         y = "read age") +
+    guides(color = guide_legend(override.aes = list(size = 4))) + 
+    theme(text = element_text(size = 12),  # Default text size for all text elements
+          plot.title = element_text(size = 20, face="bold"),  # Plot title
+          axis.title = element_text(size = 16),  # Axis titles (both x and y)
+          axis.text = element_text(size = 14),  # Axis text (both x and y)
+          legend.title = element_text(size = 14),  # Legend title
+          legend.text = element_text(size = 12))  # Legend items
+# outs <- c(31,67,74,95)
 
 
-# ONES TO LOOK AT, high T2 loadings
-
-c(53, 
-  95(maybe 94?), 
-  27, 
-  74 (73 maybe), 
-  57, 
-  94 (93?), 
-  78 (77?))
-
-
-
-
-scan_avg_filter_1 <- scan_avg_filter[complete.cases(scan_avg_filter$read_age), ] # filter only aged specimens
-pca_temp <- pca(scan_avg_filter[, 21:ncol(scan_avg_filter), ])
-scan_avg_filter_1$PC1 <- pca_temp$res$cal$scores[, 1]
-scan_avg_filter_1$PC2 <- pca_temp$res$cal$scores[, 2]
-rm(pca_temp)
-# library(plotly)
-
-ggplotly(
-  ggplot() +
-    geom_point(data = scan_avg_filter_1,
-               aes(x = PC1, y = PC2, color = read_age), size = 5
-    ) + 
-    scale_color_viridis() +
-    geom_point()
-)
-# weird ones include read_age 135 spec 52 ,, ______ 208 spec 96 , 210 (spec 85, HIGH CV, REMOVE FOR NOW), 
-# 148 (spec 70, image corrupted, remove, cannot reage for now, hatch date LATE), CAN REMOVE 135, spec 52 
-
-
-
-# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP) REMOVE 
-# 148 (spec 65, remove????)
-# 
-# 
-# 164 - spec 67, small length outlier...!????
-# 188 - spec 74, aging is all over the place, remove....
-# 175 spec 53, LARGE SPECIMEN SO MAYBE OUTLIER?????
-
-
-
-
-
-
-
-
-
-
-
-9 53 57 68 70 73
-
-
-# weird ones include read_age 135 spec 52, 208 spec 96 , 210 spec 85, 148 spec 70, 175 spec 53, 164 - spec 67, 188 - spec 74, # 147 (spec 59, 148 (spec 65
-
-
-
-# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP) REMOVE 
-# 148 (spec 65, remove????)
-# 
-# 
-# 164 - spec 67, small length outlier...!????
-# 188 - spec 74, aging is all over the place, remove....
-# 175 spec 53, LARGE SPECIMEN SO MAYBE OUTLIER?????
-
-
-
-
-
-
-
-# weird ones include read_age 135 spec 52 ,, ______ 208 spec 96 , 210 (spec 85, HIGH CV, REMOVE FOR NOW), 
-# 148 (spec 70, image corrupted, remove, cannot reage for now, hatch date LATE), CAN REMOVE 135, spec 52 
-# 
-
-
-# 147 (spec 59, HIGH CV BUT MAD ICNREMENTS< KEEP)
-# (spec 96, really small CV, keep)
-# (175, spec 53 seems ok), , 
+# find outliers based on otolith weight and age - >2 SD
+df.temp <- df[complete.cases(df$structure_weight), ] # filter only aged specimens
+model <- lm(read_age ~ structure_weight, data = df.temp)
+df.temp <- df.temp %>%
+    mutate(residuals = resid(model))
+residual_threshold <- 2 * sd(df.temp$residuals)
+df.temp <- df.temp %>%
+    mutate(outlier = ifelse(abs(residuals) > residual_threshold, TRUE, FALSE))
+df.temp %>%
+    ggplot(aes(x = structure_weight, y = read_age)) +
+    geom_smooth(color = "#003d5b", 
+                method = "lm", 
+                se = FALSE,
+                size = 3,
+                alpha = 0.2) +
+    geom_point(aes(color = outlier), 
+               size = 4, 
+               alpha = 0.6,
+               ) + 
+    scale_color_manual(values = c("FALSE" = "#00798c", 
+                                  "TRUE" = "#c1121f")) +
+    ggrepel::geom_label_repel(
+      data = filter(df.temp, outlier),
+      aes(label = specimen),
+      size = 3, 
+      nudge_x = 0.1, 
+      nudge_y = 0.1, 
+      color = "#c1121f"
+    ) +
+    theme_minimal() + 
+    labs(title = "structure_weight vs age",
+         x = "structure_weight",
+         y = "read age") +
+    guides(color = guide_legend(override.aes = list(size = 4))) + 
+    theme(text = element_text(size = 12),  # Default text size for all text elements
+          plot.title = element_text(size = 20, face="bold"),  # Plot title
+          axis.title = element_text(size = 16),  # Axis titles (both x and y)
+          axis.text = element_text(size = 14),  # Axis text (both x and y)
+          legend.title = element_text(size = 14),  # Legend title
+          legend.text = element_text(size = 12))  # Legend items
+# outs <- c(67,74,77,95)
 ```
+
 
