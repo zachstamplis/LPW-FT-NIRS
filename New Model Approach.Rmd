@@ -6,9 +6,9 @@ I'm redoing my modelling approach a bit per Franz's suggestions.  The general ap
 - List all selected models and AIC from dredge function
 
 
-```{r, results = 'hide', warning = F, message = F, cache = T}
+```{r, results = 'hide', warning = F, message = F}
 # Install packages not yet installed
-packages <- c("caret", "corrplot", "devtools", "DT", "dplyr", "gglm", "ggplot2", "gratia", "gridExtra", "knitr", "lubridate", "mdatools", "mgcv", "MuMIn", "opusreader2", "prospectr", "splitstackshape","shiny","shinyWidgets", "tidyr", "viridis")
+packages <- c("caret", "corrplot", "dplyr","devtools", "DT", "dplyr", "gglm", "ggplot2", "gratia", "gridExtra", "knitr", "lubridate", "mdatools", "mgcv", "MuMIn", "opusreader2", "prospectr", "splitstackshape","shiny","shinyWidgets", "tidyr", "viridis")
 installed_packages <- packages %in% rownames(installed.packages())
 if (any(installed_packages == FALSE)) {
   utils::install.packages(pkgs = packages[!installed_packages])
@@ -33,10 +33,10 @@ I'm trying to decide whether to cutoff the wavenumbers >7500 since this region i
 # cut off >7500 wavenumber
 df_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
 
-# ALL waves
+# ALL wavenumbers
 df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 
-# adjust preprocessing?
+# adjust preprocessing
 # df <- readRDS("RDS_dataframes/LPW_scan_avg_unproc.RDS")
 # df <- cbind(df[, c(1:20)], savitzkyGolay(df[, 21:length(df)], m = 1, p = 3, w = 17))
 ```
@@ -49,7 +49,7 @@ I had to reduce the number of PC's in my GAMs models to improve overall fit.  R2
 ```{r, eval=FALSE}
 # unfiltered spectra
 # remove unaged specimens before calculating PCs
-df <- df[complete.cases(df$read_age), ] 
+df <- df[complete.cases(df$read_age), ]
 
 pca_temp <- pca(df[, 21:ncol(df), ])
 pc_df <- data.frame(PC1 = rep(0,nrow(df)))
@@ -57,7 +57,7 @@ for (i in 1:10) {
   pc_df[, paste0("PC", i)] <- pca_temp$res$cal$scores[, i]
   rm(i)
 }
-pc_df <- cbind(pc_df,df) 
+pc_df <- cbind(pc_df,df)
 global_lm <- lm(data = pc_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
 global_gam <- gam(data = pc_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6)) # adding too many PC's makes GAM have horrible fit and R2
 
@@ -75,30 +75,28 @@ for(i in 1:5){
   rm(i)
 }
 
-# filter wavenumbers >7500
-df_filter <- df_filter[complete.cases(df_filter$read_age), ] 
-df_filter <- df_filter %>% filter(specimen != 77)
+#### filter wavenumbers >7500
+df_filter <- df_filter[complete.cases(df_filter$read_age), ]
 pca_filter_temp <- pca(df_filter[, 21:ncol(df_filter), ])
 pc_filter_df <- data.frame(PC1 = rep(0,nrow(df_filter)))
 for (i in 1:10) {
   pc_filter_df[, paste0("PC", i)] <- pca_filter_temp$res$cal$scores[, i]
   rm(i)
 }
-pc_filter_df <- cbind(pc_filter_df,df_filter) 
+pc_filter_df <- cbind(pc_filter_df,df_filter)
 global_lm_filter <- lm(data = pc_filter_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
-global_gam_filter <- gam(data = pc_filter_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6))
+global_gam_filter <- gam(data = pc_df_filter, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6))
 dredge_lm_filter <- dredge(global_lm_filter)
+top5_lm <- get.models((dredge_lm_filter), subset = 1:5)
 dredge_gam_filter <- dredge(global_gam_filter)
-
-# report differences in models selected
-print("top 5 lm models all wavenumbers")
-dredge_lm[1:5,]
-print("top 5 lm models wavenumbers < 7500")
-dredge_lm_filter[1:5,]
-print("top 5 gam models all wavenumbers")
-dredge_gam[1:5,]
-print("top 5 gam models wavenumbers < 7500")
-dredge_gam_filter[1:5,]
+top5_gam <- get.models(dredge_gam_filter, subset = 1:5)
+terms_lm <- list()
+terms_gam <- list()
+for(i in 1:5){
+  terms_lm[[i]] <- top5_lm[[i]]$terms
+  terms_gam[[i]] <- top5_gam[[i]]$formula
+  rm(i)
+}
 
 rm(global_gam, global_lm, top5_gam, top5_lm, pc_df, pca_temp, dredge_gam,dredge_lm)
 rm(global_gam_filter, global_lm_filter, pc_filter_df, pca_filter_temp, dredge_gam_filter, dredge_lm_filter)
@@ -252,6 +250,8 @@ rm(rmse.pls, r2.pls)
 # Look for potential outliers
 Below are a couple approaches to find outliers I'm looking at without nit-picking via spectra and PCA.  Many of the specimens are borderline whether they should be removed or not, however I have previously seen that my largest specimen (#77, 182 cm) seems to throw off estimates and may be excluded from analysis.  
 ```{r}
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+df <- df[complete.cases(df$read_age), ] 
 # find outliers based on length and age - >2 SD
 model <- lm(read_age ~ length, data = df)
 df.temp <- df %>%
@@ -264,7 +264,7 @@ df.temp %>%
     geom_smooth(color = "#003d5b", 
                 method = "lm", 
                 se = FALSE,
-                size = 3,
+                linewidth = 3,
                 alpha = 0.2) +
     geom_point(aes(color = outlier), 
                size = 4, 
@@ -307,7 +307,7 @@ df.temp %>%
     geom_smooth(color = "#003d5b", 
                 method = "lm", 
                 se = FALSE,
-                size = 3,
+                linewidth = 3,
                 alpha = 0.2) +
     geom_point(aes(color = outlier), 
                size = 4, 
@@ -337,7 +337,7 @@ df.temp %>%
 # outs <- c(67,74,77,95)
 ```
 
-# Functions for above code to run all modelling with given data frame
+## Functions for above code to run all modelling with given data frame are in this section
 
 ```{r include=FALSE}
 run_models <- function(mydf){
@@ -527,37 +527,37 @@ get.my.models <- function() {
 
 ```
 
-# Including all wavenumbers, no outliers removed
+### Including all wavenumbers, no outliers removed
 
 ```{r}
 # ALL waves
-df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
-results_allwaves <- run_models(df)
-mods_allwaves <- get.my.models()
-saveRDS(results_allwaves, "shiny/results_allwaves.RDS")
-saveRDS(mods_allwaves, "shiny/mods_allwaves.RDS")
+# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+# results_allwaves <- run_models(df)
+# mods_allwaves <- get.my.models()
+# saveRDS(results_allwaves, "shiny/results_allwaves.RDS")
+# saveRDS(mods_allwaves, "shiny/mods_allwaves.RDS")
 ```
 
-# Excluding wavenumbers > 7500, no outliers removed
+### Excluding wavenumbers > 7500, no outliers removed
 
 ```{r}
 # cut off >7500 wavenumber
-df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
-results_filtered <- run_models(df)
-mods_filtered <- get.my.models()
-saveRDS(results_filtered, "shiny/results_filtered.RDS")
-saveRDS(mods_filtered, "shiny/mods_filtered.RDS")
+# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+# results_filtered <- run_models(df)
+# mods_filtered <- get.my.models()
+# saveRDS(results_filtered, "shiny/results_filtered.RDS")
+# saveRDS(mods_filtered, "shiny/mods_filtered.RDS")
 ```
 
-# All wavenumbers, remove specimen #77 (very large)
+## All wavenumbers, remove specimen #77 (very large)
 
 ```{r}
 # remove specimen 77, all waves
-df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
-df <- df %>% filter(specimen != 77)
-results_allwaves_no77 <- run_models(df)
-mods_allwaves_no77 <- get.my.models()
-saveRDS(results_allwaves_no77, "shiny/results_allwaves_no77.RDS")
-saveRDS(mods_allwaves_no77, "shiny/mods_allwaves_no77.RDS")
+# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+# df <- df %>% filter(specimen != 77)
+# results_allwaves_no77 <- run_models(df)
+# mods_allwaves_no77 <- get.my.models()
+# saveRDS(results_allwaves_no77, "shiny/results_allwaves_no77.RDS")
+# saveRDS(mods_allwaves_no77, "shiny/mods_allwaves_no77.RDS")
 ```
 
