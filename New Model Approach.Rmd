@@ -31,8 +31,8 @@ rm(installed_packages, packages) # remove objects from environment
 I'm trying to decide whether to cutoff the wavenumbers >7500 since this region is relatively "noisy".  After some investigating I may opt to include this region as my models tend to fit a bit better.  Preprocessing tweaks don't seem to be making a huge different so opting for Matta et al's 1,3,17 for SG filter.
 ```{r, eval=FALSE}
 # cut off >7500 wavenumber
-df_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
-
+# df_filter <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+df <- df_filter
 # ALL wavenumbers
 df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 
@@ -59,7 +59,11 @@ for (i in 1:10) {
 }
 pc_df <- cbind(pc_df,df)
 global_lm <- lm(data = pc_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
-global_gam <- gam(data = pc_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6)) # adding too many PC's makes GAM have horrible fit and R2
+global_gam <- gam(data = pc_df, read_age ~ s(PC1,k = 4) + s(PC2,k = 4) + s(PC3,k = 4) + s(PC4,k = 4) + s(PC5,k = 4) + s(PC6,k = 4) + s(PC7,k = 4) + s(PC7,k = 4) + s(PC8,k = 4) + s(PC9,k = 4) + s(PC10,k = 4)) # adding too many PC's makes GAM have horrible fit and R2
+
+
+# s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6)
+
 
 # dredge to find top 5 models
 options(na.action = "na.fail")
@@ -75,31 +79,31 @@ for(i in 1:5){
   rm(i)
 }
 
-#### filter wavenumbers >7500
-df_filter <- df_filter[complete.cases(df_filter$read_age), ]
-pca_filter_temp <- pca(df_filter[, 21:ncol(df_filter), ])
-pc_filter_df <- data.frame(PC1 = rep(0,nrow(df_filter)))
-for (i in 1:10) {
-  pc_filter_df[, paste0("PC", i)] <- pca_filter_temp$res$cal$scores[, i]
-  rm(i)
-}
-pc_filter_df <- cbind(pc_filter_df,df_filter)
-global_lm_filter <- lm(data = pc_filter_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
-global_gam_filter <- gam(data = pc_df_filter, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6))
-dredge_lm_filter <- dredge(global_lm_filter)
-top5_lm <- get.models((dredge_lm_filter), subset = 1:5)
-dredge_gam_filter <- dredge(global_gam_filter)
-top5_gam <- get.models(dredge_gam_filter, subset = 1:5)
-terms_lm <- list()
-terms_gam <- list()
-for(i in 1:5){
-  terms_lm[[i]] <- top5_lm[[i]]$terms
-  terms_gam[[i]] <- top5_gam[[i]]$formula
-  rm(i)
-}
+# #### filter wavenumbers >7500
+# df_filter <- df_filter[complete.cases(df_filter$read_age), ]
+# pca_filter_temp <- pca(df_filter[, 21:ncol(df_filter), ])
+# pc_filter_df <- data.frame(PC1 = rep(0,nrow(df_filter)))
+# for (i in 1:10) {
+#   pc_filter_df[, paste0("PC", i)] <- pca_filter_temp$res$cal$scores[, i]
+#   rm(i)
+# }
+# pc_filter_df <- cbind(pc_filter_df,df_filter)
+# global_lm_filter <- lm(data = pc_filter_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
+# global_gam_filter <- gam(data = pc_df_filter, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6))
+# dredge_lm_filter <- dredge(global_lm_filter)
+# top5_lm <- get.models((dredge_lm_filter), subset = 1:5)
+# dredge_gam_filter <- dredge(global_gam_filter)
+# top5_gam <- get.models(dredge_gam_filter, subset = 1:5)
+# terms_lm <- list()
+# terms_gam <- list()
+# for(i in 1:5){
+#   terms_lm[[i]] <- top5_lm[[i]]$terms
+#   terms_gam[[i]] <- top5_gam[[i]]$formula
+#   rm(i)
+# }
 
 rm(global_gam, global_lm, top5_gam, top5_lm, pc_df, pca_temp, dredge_gam,dredge_lm)
-rm(global_gam_filter, global_lm_filter, pc_filter_df, pca_filter_temp, dredge_gam_filter, dredge_lm_filter)
+# rm(global_gam_filter, global_lm_filter, pc_filter_df, pca_filter_temp, dredge_gam_filter, dredge_lm_filter)
 ```
 
 # 10-fold split
@@ -337,6 +341,154 @@ df.temp %>%
 # outs <- c(67,74,77,95)
 ```
 
+
+# Run GAM and LM dredge with 3-10 PCs & store all results 
+
+
+```{r}
+# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+df <- df[complete.cases(df$read_age), ] 
+# Create a list to store all results
+all_results <- list()
+
+# Loop through different numbers of PCs (3 to 10)
+for(num_pcs in 3:10) {
+  # Create PC dataframe
+  pca_temp <- pca(df[, 21:ncol(df), ])
+  pc_df <- data.frame(PC1 = rep(0,nrow(df)))
+  for (i in 1:num_pcs) {
+    pc_df[, paste0("PC", i)] <- pca_temp$res$cal$scores[, i]
+  }
+  pc_df <- cbind(pc_df,df)
+  
+  # Create formula strings dynamically based on num_pcs
+  lm_formula_terms <- paste0("PC", 1:num_pcs, collapse = " + ")
+  gam_formula_terms <- paste0("s(PC", 1:num_pcs, ",k = 4)", collapse = " + ")
+  
+  # Create global models
+  global_lm <- lm(as.formula(paste("read_age ~", lm_formula_terms)), data = pc_df)
+  global_gam <- gam(as.formula(paste("read_age ~", gam_formula_terms)), data = pc_df)
+  
+  # Dredge to find top 5 models
+  options(na.action = "na.fail")
+  dredge_lm <- dredge(global_lm)
+  top5_lm <- get.models((dredge_lm), subset = 1:5)
+  dredge_gam <- dredge(global_gam)
+  top5_gam <- get.models(dredge_gam, subset = 1:5)
+  
+  terms_lm <- list()
+  terms_gam <- list()
+  for(i in 1:5){
+    terms_lm[[i]] <- top5_lm[[i]]$terms
+    terms_gam[[i]] <- top5_gam[[i]]$formula
+  }
+  
+  # 10 fold CV split
+  set.seed(6)
+  splits <- caret::createFolds(df$read_age, k = 10, list = TRUE, returnTrain = FALSE)
+  
+  # Create calibration and test sets
+  cal <- list()
+  test <- list()
+  for (i in 1:10) {
+    pc.mod <- preProcess(df[-splits[[i]], -c(1:20)], method = c("pca","center"), pcaComp = num_pcs)
+    pc.cal <- predict(pc.mod, df[-splits[[i]], -c(1:20)])
+    pc.cal <- cbind(pc.cal, df[-splits[[i]], ])
+    cal[[i]] <- pc.cal
+    
+    pc.test <- predict(pc.mod, df[splits[[i]], -c(1:20)])
+    pc.test <- cbind(pc.test, df[splits[[i]], ])
+    test[[i]] <- pc.test
+  }
+  
+  # LM - top 5 models
+  mods.lm <- replicate(10, list())
+  r2_lm <- list()
+  rmse_lm <- list()
+  for (i in 1:10) {
+    calibrate <- cal[[i]]
+    testing <- test[[i]]
+    r2_temp <- rep(0, 5)
+    rmse_temp <- rep(0, 5)
+    for (j in 1:5) {
+      mod <- lm(data = calibrate, terms_lm[[j]])
+      preds <- predict(mod, newdata = testing)
+      rmse_temp[j] <- caret::RMSE(pred = preds, obs = testing[, "read_age"])
+      RSS <- sum((testing$read_age - preds)^2)
+      TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+      r2_temp[j] <- 1 - (RSS / TSS)
+      mods.lm[[i]][[j]] <- mod
+    }
+    r2_lm[[i]] <- data.frame(Model = paste0("Linear ", 1:5), r2 = r2_temp)
+    rmse_lm[[i]] <- data.frame(Model = paste0("Linear ", 1:5), rmse = rmse_temp)
+  }
+  
+  # GAM - top 5 models
+  mods.gam <- replicate(10, list())
+  r2_gam <- list()
+  rmse_gam <- list()
+  for (i in 1:10) {
+    calibrate <- cal[[i]]
+    testing <- test[[i]]
+    r2_temp <- rep(0, 5)
+    rmse_temp <- rep(0, 5)
+    for (j in 1:5) {
+      mod <- gam(data = calibrate, terms_gam[[j]])
+      preds <- predict(mod, newdata = testing)
+      rmse_temp[j] <- caret::RMSE(pred = preds, obs = testing[, "read_age"])
+      RSS <- sum((testing$read_age - preds)^2)
+      TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+      r2_temp[j] <- 1 - (RSS / TSS)
+      mods.gam[[i]][[j]] <- mod
+    }
+    r2_gam[[i]] <- data.frame(Model = paste0("GAM ", 1:5), r2 = r2_temp)
+    rmse_gam[[i]] <- data.frame(Model = paste0("GAM ", 1:5), rmse = rmse_temp)
+  }
+  
+  # Modify the results creation part within the main loop:
+  
+  # Calculate final results
+  r2_lm <- sapply(r2_lm, "[[", "r2")
+  r2_lm <- rowMeans(r2_lm)
+  rmse_lm <- sapply(rmse_lm, "[[", "rmse")
+  rmse_lm <- rowMeans(rmse_lm)
+  
+  # Create lm_result with formulas
+  lm_result <- data.frame(
+    Model = paste0("Linear ", 1:5),
+    Mean_R2 = r2_lm,
+    Mean_RMSE = rmse_lm,
+    Formula = sapply(top5_lm, function(x) Reduce(paste, deparse(formula(x))))  # Extract formula
+  )
+  
+  r2_gam <- sapply(r2_gam, "[[", "r2")
+  r2_gam <- rowMeans(r2_gam)
+  rmse_gam <- sapply(rmse_gam, "[[", "rmse")
+  rmse_gam <- rowMeans(rmse_gam)
+  
+  # Create gam_result with formulas
+  gam_result <- data.frame(
+    Model = paste0("GAM ", 1:5),
+    Mean_R2 = r2_gam,
+    Mean_RMSE = rmse_gam,
+    Formula = sapply(top5_gam, function(x) Reduce(paste, deparse(formula(x))))  # Extract formula
+  )
+  
+  # Combine results and add number of PCs
+  results <- rbind(lm_result, gam_result)
+  results$Num_PCs <- num_pcs
+  
+  # Store results for this iteration
+  all_results[[paste0("PCs_", num_pcs)]] <- results
+}
+
+# Combine all results into one dataframe
+final_results <- do.call(rbind, all_results)
+rownames(final_results) <- NULL
+```
+
+
+
 ## Functions for above code to run all modelling with given data frame are in this section
 
 ```{r include=FALSE}
@@ -351,7 +503,7 @@ for (i in 1:10) {
 }
 pc_df <- cbind(pc_df,df) 
 global_lm <- lm(data = pc_df, read_age ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10)
-global_gam <- gam(data = pc_df, read_age ~ s(PC1) + s(PC2) + s(PC3) + s(PC4) + s(PC5) + s(PC6)) # adding too many PC's makes GAM have horrible fit and R2
+global_gam <- gam(data = pc_df, read_age ~ s(PC1,k=4) + s(PC2,k=4) + s(PC3,k=4) + s(PC4,k=4) + s(PC5,k=4) + s(PC6,k=4)) # adding too many PC's makes GAM have horrible fit and R2
 
 # dredge to find top 5 models
 options(na.action = "na.fail")
@@ -531,33 +683,33 @@ get.my.models <- function() {
 
 ```{r}
 # ALL waves
-# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
-# results_allwaves <- run_models(df)
-# mods_allwaves <- get.my.models()
-# saveRDS(results_allwaves, "shiny/results_allwaves.RDS")
-# saveRDS(mods_allwaves, "shiny/mods_allwaves.RDS")
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+results_allwaves <- run_models(df)
+mods_allwaves <- get.my.models()
+saveRDS(results_allwaves, "results_allwaves.RDS")
+saveRDS(mods_allwaves, "mods_allwaves.RDS")
 ```
 
 ### Excluding wavenumbers > 7500, no outliers removed
 
 ```{r}
 # cut off >7500 wavenumber
-# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
-# results_filtered <- run_models(df)
-# mods_filtered <- get.my.models()
-# saveRDS(results_filtered, "shiny/results_filtered.RDS")
-# saveRDS(mods_filtered, "shiny/mods_filtered.RDS")
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_filter.RDS")
+results_filtered <- run_models(df)
+mods_filtered <- get.my.models()
+saveRDS(results_filtered, "results_filtered.RDS")
+saveRDS(mods_filtered, "mods_filtered.RDS")
 ```
 
 ## All wavenumbers, remove specimen #77 (very large)
 
 ```{r}
 # remove specimen 77, all waves
-# df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
-# df <- df %>% filter(specimen != 77)
-# results_allwaves_no77 <- run_models(df)
-# mods_allwaves_no77 <- get.my.models()
-# saveRDS(results_allwaves_no77, "shiny/results_allwaves_no77.RDS")
-# saveRDS(mods_allwaves_no77, "shiny/mods_allwaves_no77.RDS")
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
+df <- df %>% filter(specimen != 77)
+results_allwaves_no77 <- run_models(df)
+mods_allwaves_no77 <- get.my.models()
+saveRDS(results_allwaves_no77, "results_allwaves_no77.RDS")
+saveRDS(mods_allwaves_no77, "mods_allwaves_no77.RDS")
 ```
 
