@@ -382,6 +382,9 @@ server <- function(input, output, session) {
     selected_results()
   }, 
   options = list(
+    pageLength = -1,  # Show all entries
+    scrollY = "400px",  # Add scrolling for better viewing
+    scrollCollapse = TRUE,
     ordering = TRUE,
     dom = 't',
     searching = FALSE
