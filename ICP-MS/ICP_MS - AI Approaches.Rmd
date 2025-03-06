@@ -1,0 +1,861 @@
+# Load packages
+Install and load necessary packages
+```{r}
+packages <- c("tidyverse")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages) > 0) {
+  install.packages(new_packages)
+}
+invisible(lapply(packages, library, character.only = TRUE))
+rm(packages, new_packages)
+```
+
+# Data Import
+Read and prepare initial dataframe for otolith elemental analysis from saved RDS file
+
+```{r}
+# Load ICP-MS data from RDS file
+df <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+
+# Select only otolith specimens (rows 30-184)
+df <- df[c(30:184)]
+```
+
+### create single dataframe (remove lists)
+```{r}
+# no specimen 14
+# specimen 24 missing a third transect
+for(i in 1:155){
+  spec <- names(df[i])
+  df[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+  rm(spec,i)
+}
+df <- do.call("rbind", df)
+df <- rename(df, "time" = `Elapsed Time`)
+# saveRDS(df, "RDS_dataframes/ICP-MS_df.RDS")
+rm(ICP_MS, df)
+```
+
+### outliers
+```{r}
+bad <- c(10,14,30,32,34,35)
+good <- 1:40
+good <- good[!good %in% c(bad)]
+```
+
+
+# Best Approach
+
+
+
+### find_otolith_boundaries()
+Detect Otolith Boundaries using Ca43 and Cu65 signals
+ca43_data: Numeric vector of Ca43 measurements
+cu65_data: Numeric vector of Cu65 measurements
+window_size:  Size of moving average window (default: 7)
+```{r}
+find_otolith_boundaries <- function(ca43_data, cu65_data, window_size = 7) {
+  # Data preparation
+  n_points <- length(ca43_data)
+  # Calculate rolling medians with larger window for stability
+  ma_ca43 <- stats::runmed(ca43_data, k = window_size)
+  ma_cu65 <- stats::runmed(cu65_data, k = window_size)
+  # Calculate percentiles using middle portion of data for better baseline
+  mid_start <- ceiling(n_points * 0.3)
+  mid_end <- floor(n_points * 0.7)
+  mid_data_ca43 <- ma_ca43[mid_start:mid_end]
+  # Get reference levels
+  ca43_median <- median(mid_data_ca43, na.rm = TRUE)
+  ca43_start_threshold <- ca43_median * 0.4  # More lenient threshold
+  # Start detection with minimum signal requirements
+  min_stable_points <- 5
+  start_idx <- NULL
+  # Look for sustained rise in Ca43
+  for(i in window_size:(n_points-min_stable_points)) {
+    window <- ma_ca43[i:(i+min_stable_points)]
+    if(all(window > ca43_start_threshold) && 
+       mean(window) > mean(ma_ca43[(i-window_size):i])) {
+      start_idx <- i
+      break
+    }
+  }
+  # Fallback if no clear start found
+  if(is.null(start_idx)) {
+    # Use first major rise in Ca43
+    for(i in 2:n_points) {
+      if(ma_ca43[i] > ca43_start_threshold && 
+         ma_ca43[i] > mean(ma_ca43[max(1, i-5):i]) * 1.5) {
+        start_idx <- i
+        break
+      }
+    }
+  }
+  # If still no start found, use conservative approach
+  if(is.null(start_idx)) {
+    start_idx <- ceiling(n_points * 0.1)  # Use first 10% as default
+  }
+  # End detection
+  end_idx <- n_points
+  tail_length <- min(50, ceiling(n_points * 0.1))
+  # Only look for end if we have enough points
+  if(n_points - start_idx > window_size * 3) {
+    tail_median <- median(ma_ca43[(n_points-tail_length):n_points])
+    for(i in (n_points-tail_length):start_idx) {
+      if(mean(ma_ca43[i:(i+min(4, n_points-i))]) < ca43_median * 0.3) {
+        end_idx <- i
+        break
+      }
+    }
+  }
+  # Validate and adjust boundaries
+  if(end_idx - start_idx < 100) {  # Minimum reasonable length
+    end_idx <- n_points
+    start_idx <- min(start_idx, ceiling(n_points * 0.15))  # Max 15% from start
+  }
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    filtered_data = ca43_data[start_idx:end_idx],
+    diagnostics = list(
+      ca43_median = ca43_median,
+      start_threshold = ca43_start_threshold
+    )
+  ))
+}
+```
+### process_otoliths()
+Process all otolith transects
+```{r}
+#'  otolith_list List of dataframes containing Ca43 and Cu65_ppm measurements
+#'  Summary dataframe of processing results
+process_otoliths <- function(otolith_list) {
+  results <- list()
+  failed_specimens <- character()
+  
+  for(name in names(otolith_list)) {
+    tryCatch({
+      bounds <- find_otolith_boundaries(
+        otolith_list[[name]]$Ca43,
+        otolith_list[[name]]$Cu65_ppm
+      )
+      results[[name]] <- bounds
+      cat("Processed", name, 
+          "- Start:", bounds$start, 
+          "End:", bounds$end, "\n")
+    }, error = function(e) {
+      cat("Error processing", name, ":", e$message, "\n")
+      failed_specimens <- c(failed_specimens, name)
+    })
+  }
+  summary_df <- data.frame(
+    transect = names(results),
+    start_index = sapply(results, `[[`, "start"),
+    end_index = sapply(results, `[[`, "end"),
+    original_length = sapply(otolith_list[names(results)], nrow),
+    filtered_length = sapply(results, function(x) length(x$filtered_data))
+  )
+  summary_df$points_removed <- summary_df$original_length - summary_df$filtered_length
+  attr(summary_df, "failed_specimens") <- failed_specimens
+  return(summary_df)
+}
+```
+#### outlier from analysis
+```{r}
+# Documentation for anomalous specimen oto10-2
+ANOMALY_NOTE <- list(
+  specimen_id = "oto10-2",
+  issue = "Mid-transect elemental data disruption",
+  details = list(
+    observation = "All elemental data show aberrant values in middle section",
+    impact = "Creates artificial truncation in data processing",
+    location = "Around point 288 in transect",
+    comparison = "Other oto10 series (0,1,3) show normal patterns"
+  ),
+  recommendation = "Should be flagged for separate analysis or potential exclusion from bulk processing"
+)
+
+```
+
+### Filter DF
+
+```{r}
+# Process all specimens
+results <- process_otoliths(df)
+# Create filtered version of original dataset
+filtered_df <- lapply(names(df), function(specimen) {
+  # Get boundaries for this specimen
+  bounds <- results[results$transect == specimen, ]
+  
+  # Skip if specimen is the documented anomaly
+  if(specimen == "oto10-2") {
+    warning(paste("Skipping known anomalous specimen:", specimen))
+    return(NULL)
+  }
+  
+  # Extract relevant portion of data
+  df[[specimen]][bounds$start_index:bounds$end_index, ]
+})
+# Name the list elements
+names(filtered_df) <- names(df)
+# Remove NULL entries (anomalous specimens)
+filtered_df <- filtered_df[!sapply(filtered_df, is.null)]
+# saveRDS(filtered_df, "RDS_dataframes/ICP-MS_cutoffs_df.RDS")
+```
+
+### Validation checks
+```{r validation}
+# Check filtered dataset
+cat("Original specimens:", length(df), "\n")
+cat("Filtered specimens:", length(filtered_df), "\n")
+cat("Removed specimens:", setdiff(names(df), names(filtered_df)), "\n")
+
+# Check lengths match results
+all_match <- all(sapply(names(filtered_df), function(specimen) {
+  nrow(filtered_df[[specimen]]) == 
+    results$filtered_length[results$transect == specimen]
+}))
+cat("All lengths match results:", all_match, "\n")
+```
+
+### generate_otolith_stats()
+summary stats from filtered DF, both by transect and per otolith
+```{r}
+generate_otolith_stats <- function(filtered_df) {
+  elements <- c("Ca43", "Li7_ppm", "B11_ppm", "Mg24_ppm", "Si29_ppm", 
+                "Mn55_ppm", "Fe56_ppm", "Co59_ppm", "Ni60_ppm", 
+                "Cu63_ppm", "Cu65_ppm", "Zn66_ppm", "Rb85_ppm", 
+                "Sr86_ppm", "Sr87_ppm", "Sr88_ppm", "Cd111_ppm", 
+                "Ba138_ppm", "Ce140_ppm", "Pb206_ppm", "Pb207_ppm", 
+                "Pb208_ppm", "Th232_ppm", "PbTotal_ppm")
+  
+  format_summary_tables <- function(stats_list, elements) {
+    transect_summary <- do.call(rbind, lapply(stats_list$transect_stats, function(x) {
+      regions <- c("core", "middle", "edge")
+      
+      do.call(rbind, lapply(regions, function(r) {
+        data.frame(
+          specimen = x$specimen,
+          region = r,
+          element = elements,
+          mean = x$stats[[r]]["mean", ],
+          sd = x$stats[[r]]["sd", ],
+          n = x$stats[[r]]["n", ],
+          stringsAsFactors = FALSE
+        )
+      }))
+    }))
+    
+    otolith_summary <- do.call(rbind, lapply(stats_list$otolith_stats, function(x) {
+      regions <- c("core", "middle", "edge")
+      
+      do.call(rbind, lapply(regions, function(r) {
+        data.frame(
+          otolith = x$otolith,
+          region = r,
+          element = elements,
+          mean = x$stats[[r]]$means["mean", ],
+          rsd = x$stats[[r]]$rsd,
+          stringsAsFactors = FALSE
+        )
+      }))
+    }))
+    
+    return(list(
+      transect_summary = transect_summary,
+      otolith_summary = otolith_summary
+    ))
+  }
+  
+  transect_stats <- lapply(names(filtered_df), function(specimen) {
+    df <- filtered_df[[specimen]]
+    n_points <- nrow(df)
+    
+    core_end <- ceiling(n_points * 0.2)
+    middle_start <- core_end + 1
+    middle_end <- floor(n_points * 0.8)
+    edge_start <- middle_end + 1
+    
+    regions <- list(
+      core = df[1:core_end, ],
+      middle = df[middle_start:middle_end, ],
+      edge = df[edge_start:n_points, ]
+    )
+    
+    region_stats <- lapply(regions, function(region) {
+      sapply(elements, function(elem) {
+        data <- region[[elem]]
+        c(
+          mean = mean(data, na.rm = TRUE),
+          sd = sd(data, na.rm = TRUE),
+          median = median(data, na.rm = TRUE),
+          q25 = quantile(data, 0.25, na.rm = TRUE),
+          q75 = quantile(data, 0.75, na.rm = TRUE),
+          n = sum(!is.na(data))
+        )
+      })
+    })
+    
+    return(list(
+      specimen = specimen,
+      stats = region_stats,
+      n_points = n_points
+    ))
+  })
+  
+  otolith_ids <- unique(sub("-\\d+$", "", names(filtered_df)))
+  
+  otolith_stats <- lapply(otolith_ids, function(otolith) {
+    transects <- grep(paste0("^", otolith, "-"), names(filtered_df), value = TRUE)
+    regions <- c("core", "middle", "edge")
+    
+    combined_stats <- lapply(regions, function(region) {
+      region_stats <- lapply(transects, function(t) {
+        idx <- match(t, names(filtered_df))
+        transect_stats[[idx]]$stats[[region]]
+      })
+      
+      element_means <- Reduce(`+`, region_stats) / length(region_stats)
+      
+      element_rsd <- sapply(elements, function(elem) {
+        values <- sapply(region_stats, function(x) x[1, elem])
+        sd(values, na.rm = TRUE) / mean(values, na.rm = TRUE) * 100
+      })
+      
+      list(
+        means = element_means,
+        rsd = element_rsd
+      )
+    })
+    
+    names(combined_stats) <- regions
+    
+    return(list(
+      otolith = otolith,
+      stats = combined_stats
+    ))
+  })
+  
+  stats_list <- list(
+    transect_stats = transect_stats,
+    otolith_stats = otolith_stats
+  )
+  
+  summary_tables <- format_summary_tables(stats_list, elements)
+  
+  return(summary_tables)
+}
+
+summary_results <- generate_otolith_stats(filtered_df)
+results_transect <- summary_results$transect_summary
+results_otolith <- summary_results$otolith_summary
+# saveRDS(summary_results,"RDS_dataframes/ICP-MS_summarystats")
+```
+
+### Data analysis
+
+```{r}
+# 1. Basic Variation Check
+# Calculate RSD (Relative Standard Deviation) between transects for each otolith-element-region
+transect_variation <- function(summary_results) {
+  # Get transect summary data
+  ts <- summary_results$transect_summary
+  
+  # Group by otolith (remove transect number), element, and region
+  variation_check <- aggregate(mean ~ sub("-\\d+$", "", specimen) + element + region, 
+                               data = ts,
+                               FUN = function(x) {
+                                 c(mean = mean(x),
+                                   rsd = sd(x)/mean(x) * 100,
+                                   n_transects = length(x))
+                               })
+  
+  # Filter for high variation (e.g., RSD > 20%)
+  high_variation <- subset(variation_check, variation_check$mean[, "rsd"] > 20)
+  
+  return(list(
+    all_variation = variation_check,
+    high_variation = high_variation
+  ))
+}
+
+# 2. Statistical Test
+# Perform ANOVA for each otolith-element-region combination
+transect_anova <- function(summary_results) {
+  ts <- summary_results$transect_summary
+  
+  # Split data by otolith, element, and region
+  unique_combinations <- unique(paste(sub("-\\d+$", "", ts$specimen), 
+                                      ts$element, 
+                                      ts$region))
+  
+  # Run ANOVA for each combination
+  anova_results <- lapply(unique_combinations, function(combo) {
+    split_combo <- strsplit(combo, " ")[[1]]
+    otolith <- split_combo[1]
+    element <- split_combo[2]
+    region <- split_combo[3]
+    
+    subset_data <- subset(ts, 
+                          sub("-\\d+$", "", specimen) == otolith & 
+                            element == element & 
+                            region == region)
+    
+    if(length(unique(subset_data$mean)) > 1) {
+      anova_result <- summary(aov(mean ~ specimen, data = subset_data))
+      p_value <- anova_result[[1]]$"Pr(>F)"[1]
+      
+      return(data.frame(
+        otolith = otolith,
+        element = element,
+        region = region,
+        p_value = p_value,
+        significant = p_value < 0.05
+      ))
+    }
+    return(NULL)
+  })
+  
+  # Combine results
+  anova_results <- do.call(rbind, anova_results[!sapply(anova_results, is.null)])
+  return(anova_results)
+}
+
+# Usage:
+variation_results <- transect_variation(summary_results)
+anova_results <- transect_anova(summary_results)
+
+# Quick summary of problematic measurements
+print("Elements with high variation between transects:")
+print(variation_results$high_variation)
+
+print("Statistically significant differences between transects:")
+print(subset(anova_results, significant == TRUE))
+
+# Comparative Analysis of Elemental Composition Across Otolith Regions
+
+compare_otolith_regions <- function(summary_results) {
+  # Prepare otolith summary data
+  os <- summary_results$otolith_summary
+  
+  # ANOVA-like comparison between regions for each element
+  region_comparisons <- lapply(unique(os$element), function(elem) {
+    elem_data <- subset(os, element == elem)
+    
+    # Reshape data for statistical testing
+    region_means <- reshape2::dcast(elem_data, otolith ~ region, value.var = "mean")
+    
+    # Perform statistical tests
+    pairwise_tests <- list(
+      core_vs_middle = t.test(region_means$core, region_means$middle),
+      core_vs_edge = t.test(region_means$core, region_means$edge),
+      middle_vs_edge = t.test(region_means$middle, region_means$edge)
+    )
+    
+    # Summarize results
+    data.frame(
+      element = elem,
+      core_mean = mean(region_means$core),
+      middle_mean = mean(region_means$middle),
+      edge_mean = mean(region_means$edge),
+      core_vs_middle_p = pairwise_tests$core_vs_middle$p.value,
+      core_vs_edge_p = pairwise_tests$core_vs_edge$p.value,
+      middle_vs_edge_p = pairwise_tests$middle_vs_edge$p.value
+    )
+  })
+  
+  # Combine results
+  region_comparison_summary <- do.call(rbind, region_comparisons)
+  
+  # Adjust p-values for multiple comparisons
+  region_comparison_summary$core_vs_middle_padj <- p.adjust(region_comparison_summary$core_vs_middle_p, method = "fdr")
+  region_comparison_summary$core_vs_edge_padj <- p.adjust(region_comparison_summary$core_vs_edge_p, method = "fdr")
+  region_comparison_summary$middle_vs_edge_padj <- p.adjust(region_comparison_summary$middle_vs_edge_p, method = "fdr")
+  
+  # Identify significant differences
+  region_comparison_summary$significant_differences <- apply(
+    region_comparison_summary[, c("core_vs_middle_padj", "core_vs_edge_padj", "middle_vs_edge_padj")], 
+    1, 
+    function(x) any(x < 0.05)
+  )
+  
+  return(region_comparison_summary)
+}
+region_comparisons <- compare_otolith_regions(summary_results)
+# Print significant differences
+print(subset(region_comparisons, significant_differences == TRUE))
+
+
+```
+
+
+### compare otoliths
+
+```{r}
+compare_otoliths <- function(summary_results) {
+  # Prepare otolith summary data
+  os <- summary_results$otolith_summary
+  
+  # Perform statistical comparisons between otoliths
+  otolith_comparisons <- lapply(unique(os$element), function(elem) {
+    # Extract data for specific element
+    elem_data <- subset(os, element == elem)
+    
+    # Reshape data for statistical analysis
+    region_means <- reshape2::dcast(elem_data, otolith + region ~ element, value.var = "mean")
+    
+    # Perform ANOVA to test overall differences between otoliths
+    aov_results <- lapply(c("core", "middle", "edge"), function(reg) {
+      region_subset <- subset(region_means, region == reg)
+      
+      # Check if we have enough unique values to perform ANOVA
+      if(length(unique(region_subset$otolith)) > 1) {
+        tryCatch({
+          aov_model <- aov(get(elem) ~ otolith, data = region_subset)
+          aov_summary <- summary(aov_model)
+          
+          data.frame(
+            element = elem,
+            region = reg,
+            f_value = aov_summary[[1]]$"F value"[1],
+            p_value = aov_summary[[1]]$"Pr(>F)"[1]
+          )
+        }, error = function(e) {
+          NULL  # Return NULL if ANOVA fails
+        })
+      } else {
+        NULL  # Not enough unique values for ANOVA
+      }
+    })
+    
+    # Remove NULL results
+    aov_results <- aov_results[!sapply(aov_results, is.null)]
+    
+    # Combine results if any exist
+    if(length(aov_results) > 0) {
+      do.call(rbind, aov_results)
+    } else {
+      NULL
+    }
+  })
+  
+  # Remove NULL results and combine
+  otolith_comparisons <- otolith_comparisons[!sapply(otolith_comparisons, is.null)]
+  
+  if(length(otolith_comparisons) > 0) {
+    otolith_comparison_summary <- do.call(rbind, otolith_comparisons)
+    
+    # Adjust p-values for multiple comparisons
+    otolith_comparison_summary$p_adjusted <- p.adjust(
+      otolith_comparison_summary$p_value, 
+      method = "fdr"
+    )
+    
+    # Identify significant differences
+    otolith_comparison_summary$significant <- otolith_comparison_summary$p_adjusted < 0.05
+    
+    return(otolith_comparison_summary)
+  } else {
+    warning("No valid comparisons could be made. Check your data.")
+    return(NULL)
+  }
+}
+
+# Visualization function remains the same
+visualize_otolith_differences <- function(summary_results) {
+  library(ggplot2)
+  library(reshape2)
+  
+  os <- summary_results$otolith_summary
+  
+  # Prepare data for heatmap
+  plot_data <- dcast(os, otolith + region ~ element, value.var = "mean")
+  
+  # Melt data for ggplot
+  plot_data_long <- melt(plot_data, id.vars = c("otolith", "region"))
+  
+  # Create heatmap
+  ggplot(plot_data_long, aes(x = otolith, y = variable, fill = value)) +
+    geom_tile() +
+    facet_wrap(~ region) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+    theme_minimal() +
+    labs(title = "Elemental Composition Across Otoliths",
+         x = "Otolith", y = "Element", fill = "Mean Value")
+}
+
+# Usage
+otolith_comparisons <- compare_otoliths(summary_results)
+otolith_plot <- visualize_otolith_differences(summary_results)
+
+# Print significant differences
+if(!is.null(otolith_comparisons)) {
+  print("Significant differences between otoliths:")
+  print(subset(otolith_comparisons, significant == TRUE))
+} else {
+  print("No significant differences could be detected.")
+}
+```
+
+
+
+
+
+
+
+
+
+
+# Old Code
+# Otolith Data Processing
+
+#### detect_otolith_boundaries()
+Function to detect boundaries in Cu65 measurements. This function identifies the start and end points of valid otolith measurements based on Cu65 patterns.  Cu65 levels appear to be quite high in portions of the transect outside of the otolith.  This function specifically tries to identify the start and end of the otolith based on sustained low values of Cu65, taking an average for the
+```{r}
+detect_otolith_boundaries <- function(cu65_data, 
+                                    high_threshold = 100,    
+                                    stable_threshold = 100,
+                                    min_stable_points = 3) { 
+  # Initialize variables
+  start_idx <- NULL
+  end_idx <- NULL
+  # Remove NAs
+  clean_data <- cu65_data[!is.na(cu65_data)]
+  # Find start (look for sustained low values)
+  for(i in min_stable_points:length(clean_data)) {
+    window <- clean_data[(i-min_stable_points+1):i]
+    if(all(abs(window) < stable_threshold)) {
+      start_idx <- i-min_stable_points+1
+      break
+    }
+  }
+  # Check if start was found
+  if(is.null(start_idx)) {
+    stop("Could not detect start boundary")
+  }
+  # Find end (where values start increasing consistently)
+  for(i in start_idx:(length(clean_data)-2)) {  
+    if(i + 2 <= length(clean_data)) {  
+      window_mean <- mean(abs(clean_data[i:(i+2)]))
+      if(window_mean > stable_threshold) {
+        end_idx <- i-1
+        break
+      }
+    }
+  }
+  # Check if end was found
+  if(is.null(end_idx)) {
+    end_idx <- length(clean_data)
+  }
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    clean_data = clean_data[start_idx:end_idx],
+    mean_value = mean(clean_data[start_idx:end_idx]),
+    sd_value = sd(clean_data[start_idx:end_idx])
+  ))
+}
+```
+
+#### process_single_otolith()
+Function to process individual otolith dataframes.  Takes a single otolith dataframe and returns filtered data with boundaries.  Returns a list containing filtered data and boundary information
+```{r}
+process_single_otolith <- function(otolith_df) {
+  boundaries <- detect_otolith_boundaries(otolith_df$Cu65_ppm)
+  filtered_df <- otolith_df[boundaries$start:boundaries$end, ]
+  return(list(
+    filtered_data = filtered_df,
+    boundaries = boundaries
+  ))
+}
+```
+
+### process_all_otoliths
+Function to process the entire list of otoliths.  Includes error handling and progress reporting.  Returns a list of processed results for all otoliths
+```{r}
+process_all_otoliths <- function(otolith_list) {
+  results <- list()
+  for(otolith_name in names(otolith_list)) {
+    tryCatch({
+      results[[otolith_name]] <- process_single_otolith(otolith_list[[otolith_name]])
+      cat("Successfully processed:", otolith_name, "\n")
+    }, error = function(e) {
+      cat("Error processing", otolith_name, ":", e$message, "\n")
+    })
+  }
+  return(results)
+}
+```
+
+
+# Execute processing on all otoliths, generate summary
+
+Create summary dataframe with additional metrics including observations removed.  Calculates original observations, final observations, and number filtered out for each otolith
+```{r}
+filtered_otoliths <- process_all_otoliths(df)
+processing_summary <- data.frame(
+  otolith = names(filtered_otoliths),
+  start_index = sapply(filtered_otoliths, function(x) x$boundaries$start),
+  end_index = sapply(filtered_otoliths, function(x) x$boundaries$end),
+  total_indices = sapply(df, nrow),  # Get total rows from original df
+  filtered_indices = sapply(filtered_otoliths, function(x) (x$boundaries$end - x$boundaries$start + 1))
+)
+processing_summary$index_diff <- processing_summary$total_indices - processing_summary$filtered_indices
+# View enhanced summary
+head(processing_summary)
+```
+
+
+
+
+
+
+
+### find_optimal_thresholds()
+Function to find optimal thresholds using middle portion of data.  Returns suggested stable threshold based on statistical properties
+```{r}
+find_optimal_thresholds <- function(cu65_data) {
+  # Remove NAs
+  clean_data <- cu65_data[!is.na(cu65_data)]
+  
+  # Get the middle portion of data (likely stable region)
+  mid_start <- floor(length(clean_data) * 0.2)  # Skip first 20%
+  mid_end <- floor(length(clean_data) * 0.8)    # Skip last 20%
+  stable_region <- clean_data[mid_start:mid_end]
+  
+  # Calculate statistics
+  stable_mean <- mean(stable_region)
+  stable_sd <- sd(stable_region)
+  
+  # Suggest threshold based on mean + 2*SD
+  suggested_threshold <- stable_mean + 2*stable_sd
+  
+  return(list(
+    mean = stable_mean,
+    sd = stable_sd,
+    suggested_threshold = suggested_threshold,
+    stable_region_values = summary(stable_region)
+  ))
+}
+```
+
+### testing threshold finding and boundary detection
+
+```{r}
+# Test the threshold finding function on first otolith
+sample_thresholds <- find_optimal_thresholds(df[[1]]$Cu65_ppm)
+print(sample_thresholds)
+
+# Apply to detection function with new threshold
+test_boundaries <- detect_otolith_boundaries(
+  df[[1]]$Cu65_ppm,
+  stable_threshold = sample_thresholds$suggested_threshold,
+  min_stable_points = 3
+)
+
+```
+
+
+### Modified Process Function with Optimal Thresholds
+
+```{r}
+# Updated process function incorporating threshold detection
+process_single_otolith <- function(otolith_df) {
+  # Find optimal threshold
+  thresholds <- find_optimal_thresholds(otolith_df$Cu65_ppm)
+  
+  # Apply boundaries with optimal threshold
+  boundaries <- detect_otolith_boundaries(
+    otolith_df$Cu65_ppm,
+    stable_threshold = thresholds$suggested_threshold,
+    min_stable_points = 3
+  )
+  
+  filtered_df <- otolith_df[boundaries$start:boundaries$end, ]
+  
+  return(list(
+    filtered_data = filtered_df,
+    boundaries = boundaries,
+    thresholds = thresholds
+  ))
+}
+
+# Execute processing with new function
+filtered_otoliths <- process_all_otoliths(df) 
+```
+
+### Enhanced Summary with Threshold Information
+
+
+```{r}
+detect_otolith_boundaries <- function(cu65_data, 
+                                    high_threshold = 100,    
+                                    stable_threshold = 100,
+                                    min_stable_points = 40) { 
+  # Input validation
+  if(length(cu65_data) < min_stable_points) {
+    stop(sprintf("Data length (%d) is shorter than min_stable_points (%d)", 
+                 length(cu65_data), min_stable_points))
+  }
+  
+  # Initialize variables
+  start_idx <- NULL
+  end_idx <- NULL
+  
+  # Remove NAs
+  clean_data <- cu65_data[!is.na(cu65_data)]
+  
+  # Modified start detection - look for first set of stable low values
+  for(i in min_stable_points:length(clean_data)) {
+    window <- clean_data[(i-min_stable_points+1):i]
+    # Check if values are decreasing and below threshold
+    if(all(diff(window) <= 0) && max(window) < stable_threshold) {
+      start_idx <- i-min_stable_points+1
+      break
+    }
+  }
+  
+  if(is.null(start_idx)) {
+    # Fallback: look for first value below threshold
+    for(i in 1:length(clean_data)) {
+      if(clean_data[i] < stable_threshold) {
+        start_idx <- i
+        break
+      }
+    }
+  }
+  
+  # Check if start was found
+  if(is.null(start_idx)) {
+    stop(sprintf("Could not detect start boundary. Min value: %f, Max value: %f", 
+                 min(clean_data, na.rm=TRUE), max(clean_data, na.rm=TRUE)))
+  }
+  
+  # End detection
+  end_idx <- length(clean_data)
+  
+  # Look for last stable section before NAs or increases
+  for(i in (length(clean_data)-5):start_idx) {
+    if(!is.na(clean_data[i])) {
+      next_points <- clean_data[i:(min(i+2, length(clean_data)))]
+      if(mean(abs(next_points)) > stable_threshold || any(is.na(next_points))) {
+        end_idx <- i
+        break
+      }
+    }
+  }
+  
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    clean_data = clean_data[start_idx:end_idx],
+    mean_value = mean(clean_data[start_idx:end_idx], na.rm=TRUE),
+    sd_value = sd(clean_data[start_idx:end_idx], na.rm=TRUE)
+  ))
+}
+```
+
+
+
+
+

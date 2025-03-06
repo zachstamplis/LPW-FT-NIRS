@@ -1,0 +1,1573 @@
+---
+title: "ICP-MS Data Filtering & Analysis"
+output: 
+  html_document:
+    code_folding: hide
+---
+# Packages
+```{r fig.width=12, fig.height=8, results='asis', warning=FALSE, message=FALSE}
+# Setup and Package Loading
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 12, fig.height = 8)
+
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  broom,      # for tidying statistical test results
+  corrplot,   # nice correlation plots
+  DT,         # for interactive tables
+  htmltools,  # for HTML widget manipulation
+  kableExtra, # for formatting tables
+  knitr,      # for knitting RMarkdown
+  plotly,     # for interactive plots
+  scales,     # for scale functions in ggplot2
+  shiny,      # shiny apps
+  tidyverse,  # for data manipulation and visualization
+  vegan,      # various modeling tools
+  viridis,    # for color palettes
+  zoo         # for rolling functions
+)
+
+theme_set(theme_minimal(base_size = 14))
+```
+# Load Data
+Load in data, filter to remove reference materials, assign otolith number, transect number, region variables
+```{r}
+# Create lookup table (slide number to specimen number)
+lookup <- tribble(
+  ~slide_num, ~specimen_number,
+  1, 425957, 2, 425900, 3, 425925, 4, 425959, 5, 424584,
+  6, 424289, 7, 424295, 8, 426162, 9, 424251, 10, 424333,
+  11, 425940, 12, 424564, 13, 425999, 14, 426076, 15, 424568,
+  16, 424177, 17, 424178, 18, 424182, 19, 426153, 20, 426216,
+  21, 424195, 22, 424222, 23, 424224, 24, 424230, 25, 424232,
+  26, 424595, 27, 424597, 28, 425915, 29, 425919, 30, 425990,
+  31, 424184, 32, 424327, 33, 424339, 34, 426129, 35, 426165,
+  36, 424527, 37, 424547, 38, 425907, 39, 425945, 40, 426007
+)
+
+# Load Data and Preprocess
+df_ICP <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+valid_indices <- setdiff(30:184, c(grep("oto10-2", names(df_ICP)), grep("oto30-", names(df_ICP))))
+
+df_ICP <- df_ICP[valid_indices] %>% 
+  bind_rows(.id = "transect_id") %>%
+  mutate(
+    otolith_id = str_extract(transect_id, "oto\\d+"),
+    slide_num = as.integer(str_extract(otolith_id, "\\d+")),
+    transect_num = as.integer(str_extract(transect_id, "\\d+$")),
+    region = case_when(
+      slide_num %in% c(6:10, 16:25, 31:35) ~ "Kodiak",
+      TRUE ~ "Shumagin"
+    )
+  ) %>%
+  left_join(lookup, by = "slide_num") %>%
+  select(-slide_num)
+
+# sort variable names
+df_ICP <- df_ICP %>%
+  select(
+    otolith_id, specimen_number, transect_num, transect_id, region, `Elapsed Time`,
+    sort(setdiff(names(df_ICP), c("otolith_id", "specimen_number", "transect_num", "transect_id", "region", "Elapsed Time"))) 
+  ) %>%
+  rename(time = `Elapsed Time`)
+
+rm(lookup, valid_indices)
+```
+# Data Filtering
+This section implements an improved method for detecting the boundaries of the otolith in each transect. It uses a rolling median to smooth the Calcium-43 data and then identifies the start and end points of the otolith based on a threshold relative to the baseline concentration.
+
+### Filter df
+
+```{r}
+# After getting manual_adjustments.csv:
+manual_adj <- read.csv("manual_adjustments.csv")
+
+# Create the segmented dataset incorporating manual adjustments
+df_ICP_filt <- df_ICP %>%
+  group_by(transect_id) %>%
+  mutate(
+    row_num = row_number(),
+    # Check if this transect has manual adjustments
+    has_manual_adj = transect_id %in% manual_adj$transect_id,
+    # Get start point (either manual or quantile-based)
+    start = if_else(
+      has_manual_adj,
+      manual_adj$manual_start[match(transect_id, manual_adj$transect_id)],
+      min(which(Ca43 >= quantile(Ca43, 0.6, na.rm = TRUE)))
+    ),
+    # Get end point (either manual or quantile-based)
+    end = if_else(
+      has_manual_adj,
+      manual_adj$manual_end[match(transect_id, manual_adj$transect_id)],
+      max(which(Ca43 >= quantile(Ca43, 0.6, na.rm = TRUE)))
+    )
+  ) %>%
+  filter(row_num >= start & row_num <= end) %>%
+  group_by(transect_id) %>%
+  mutate(
+    total_rows = n(),
+    segment = case_when(
+      row_number() <= 0.2 * total_rows ~ "core",
+      row_number() > 0.8 * total_rows ~ "edge",
+      TRUE ~ "middle"
+    )
+  ) %>%
+  select(-has_manual_adj, -row_num, -start, -end, -total_rows) %>%
+  ungroup()
+rm(manual_adj)
+```
+
+### ++++ Shiny: mark cutoffs ++++
+Manually mark cutoffs for problem specimens.  Displays current cutoffs in blue, allows you to mark new cutoffs in red and save in a csv.
+
+```{r eval=FALSE, include=FALSE}
+ui <- fluidPage(
+  titlePanel("Otolith Transect Manual Adjustment"),
+
+  sidebarLayout(
+    sidebarPanel(
+      # Select transect
+      selectInput("transect", "Select Transect ID:",
+                  choices = unique(df_ICP$transect_id)),
+
+      # Sliders for start and end points
+      sliderInput("start_point", "Start Point:",
+                  min = 1, max = 100, value = 1),
+      sliderInput("end_point", "End Point:",
+                  min = 1, max = 100, value = 100),
+
+      # Save button
+      actionButton("save", "Save Cutoffs"),
+
+      # Download all adjustments
+      downloadButton("download", "Download All Adjustments")
+    ),
+
+    mainPanel(
+      plotOutput("transect_plot", height = "600px"),
+      verbatimTextOutput("saved_values")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  # Reactive values to store manual adjustments
+  manual_adjustments <- reactiveVal(data.frame(
+    transect_id = character(),
+    manual_start = numeric(),
+    manual_end = numeric(),
+    stringsAsFactors = FALSE
+  ))
+
+  # Update slider ranges when transect is selected
+  observe({
+    req(input$transect)
+    transect_data <- df_ICP %>% filter(transect_id == input$transect)
+    n_points <- nrow(transect_data)
+
+    updateSliderInput(session, "start_point",
+                      min = 1, max = n_points,
+                      value = 1)
+    updateSliderInput(session, "end_point",
+                      min = 1, max = n_points,
+                      value = n_points)
+  })
+
+  # Plot
+  output$transect_plot <- renderPlot({
+    req(input$transect)
+
+    transect_data <- df_ICP %>% filter(transect_id == input$transect)
+    
+    # Get the current cutoffs from df_segmented
+    current_cutoffs <- df_ICP_filt %>% 
+      filter(transect_id == input$transect) %>% 
+      summarise(start_time = min(time), end_time = max(time))
+
+    ggplot(transect_data, aes(x = time, y = Ca43)) +
+      geom_line() +
+      geom_vline(xintercept = current_cutoffs$start_time, color = "blue", linetype = "dashed") +
+      geom_vline(xintercept = current_cutoffs$end_time, color = "blue", linetype = "dashed") +
+      geom_vline(xintercept = transect_data$time[input$start_point], color = "red", linetype = "dashed") +
+      geom_vline(xintercept = transect_data$time[input$end_point], color = "red", linetype = "dashed") +
+      labs(title = paste("Transect:", input$transect),
+           x = "Elapsed Time",
+           y = "Ca43") +
+      theme_minimal()
+  })
+
+  # Save adjustments
+  observeEvent(input$save, {
+    current_adjustments <- manual_adjustments()
+    new_adjustment <- data.frame(
+      transect_id = input$transect,
+      manual_start = transect_data$time[input$start_point],
+      manual_end = transect_data$time[input$end_point],
+      stringsAsFactors = FALSE
+    )
+
+    # Update or add new adjustment
+    if(input$transect %in% current_adjustments$transect_id) {
+      current_adjustments[current_adjustments$transect_id == input$transect,] <- new_adjustment
+    } else {
+      current_adjustments <- rbind(current_adjustments, new_adjustment)
+    }
+
+    manual_adjustments(current_adjustments)
+  })
+
+  # Display saved adjustments
+  output$saved_values <- renderPrint({
+    adjustments <- manual_adjustments()
+    if(nrow(adjustments) == 0) {
+      "No adjustments saved yet."
+    } else {
+      adjustments
+    }
+  })
+
+  # Download handler
+  output$download <- downloadHandler(
+    filename = function() {
+      "manual_adjustments.csv"
+    },
+    content = function(file) {
+      write.csv(manual_adjustments(), file, row.names = FALSE)
+    }
+  )
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+### Average per otolith "zone" (core, middle, edge)
+
+```{r}
+
+# List of elemental variables
+elemental_vars <- names(df_ICP_filt)[which(names(df_ICP_filt) == "Ca43"):which(names(df_ICP_filt) == "Zn66_ppm")]
+
+# Create the new data frame
+df_ICP_avg <- df_ICP_filt %>%
+  group_by(specimen_number, segment) %>%
+  summarise(across(all_of(elemental_vars), mean, na.rm = TRUE)) %>%
+  ungroup() %>%
+  pivot_wider(
+    id_cols = specimen_number,
+    names_from = segment,
+    values_from = all_of(elemental_vars),
+    names_glue = "{.value}_{segment}"
+  )
+
+# Add region information
+df_ICP_avg <- df_ICP_filt %>%
+  group_by(specimen_number) %>%
+  summarise(region = first(region)) %>%
+  right_join(df_ICP_avg, by = "specimen_number")
+
+# Reorder columns to have specimen_number and region first
+df_ICP_avg <- df_ICP_avg %>%
+  select(specimen_number, region, everything())
+rm(elemental_vars)
+#saveRDS(df_ICP_avg,"RDS_dataframes/ICP-MS_avg.RDS")
+```
+
+
+# Combine with FT-NIRS Data
+Import raw data, preprocess with SG, combine with elemental data.
+```{r}
+# Load and process FT-NIRS data
+df_FTNIRS <- readRDS("RDS_dataframes/IBM_dfmeta.RDS") %>% filter(run_number == 2)
+df_FTNIRS <- cbind(df_FTNIRS[, c(1:24)], prospectr::savitzkyGolay(df_FTNIRS[,25:ncol(df_FTNIRS)], m = 1, p = 3, w = 17))
+
+# Step 1: Select only the wavenumber columns and the specimen number from FT-NIRS data
+ft_nirs_wavenumbers <- df_FTNIRS %>%
+  select(specimen, length, matches("^\\d+$"))  # This selects 'specimen' and all columns that are just numbers
+
+# Step 2: Join df_specimen_averages with FT-NIRS data
+df_combined <- df_ICP_avg %>%
+  left_join(ft_nirs_wavenumbers, by = c("specimen_number" = "specimen"))
+
+# saveRDS(df_combined, "RDS_dataframes/ICP-MS_combined")
+
+rm(df_ICP,ft_nirs_wavenumbers)
+```
+
+# Vegan & CCora 
+ICP-MS and FT-NIRS Data combined
+
+```{r}
+# Select FT-NIRS data (wavenumbers)
+ccora_y <- df_combined %>% 
+  select(matches("^\\d+$")) %>% # Select columns that are just numbers
+  as.matrix()
+
+# Select ICP-MS data
+ccora_x <- df_combined %>% 
+  select(ends_with("_core"), ends_with("_edge"), ends_with("_middle")) %>%
+  select(-starts_with("Ca43")) %>% # Exclude Ca43 if you don't want it in the analysis
+  as.matrix()
+
+# Perform PCA on FT-NIRS data
+pca_ftnirs <- prcomp(ccora_y, scale. = TRUE)
+# Determine the number of PCs to retain (explaining 95% of variance)
+var_explained <- cumsum(pca_ftnirs$sdev^2 / sum(pca_ftnirs$sdev^2))
+
+# Extract the PC scores for the selected number of components
+ftnirs_pcs <- pca_ftnirs$x[, 1:10]
+print(paste("Number of PCs retained:", 10))
+print(paste("Variance explained:", round(var_explained[10] * 100, 2), "%"))
+
+cca_result <- CCorA(X = ccora_x, Y = ftnirs_pcs)
+
+# Print summary
+print(summary(cca_result))
+
+# Extract and print canonical correlations
+can_corr <- cca_result$CanCorr
+print("Canonical Correlations:")
+print(can_corr)
+
+# Plot canonical correlations
+barplot(can_corr, 
+        names.arg = 1:length(can_corr),
+        xlab = "Canonical Dimension",
+        ylab = "Canonical Correlation",
+        main = "Canonical Correlations",
+        col = "skyblue")
+abline(h = 0.5, col = "red", lty = 2)
+
+# Print top correlations for the first few canonical variates
+print("Top 5 ICP-MS correlations with first 3 canonical variates:")
+icp_ms_correlations <- cca_result$corr.X.Cx
+print(head(icp_ms_correlations[order(-abs(icp_ms_correlations[,1])),1:3], 5))
+
+print("Top 5 FT-NIRS PC correlations with first 3 canonical variates:")
+ftnirs_pc_correlations <- cca_result$corr.Y.Cy
+print(head(ftnirs_pc_correlations[order(-abs(ftnirs_pc_correlations[,1])),1:3], 5))
+```
+
+### Correlation heatmaps:
+
+```{r}
+library(reshape2)
+library(pheatmap)
+
+
+# Use the full correlation matrix
+cor_matrix <- cor(ccora_x, ftnirs_pcs)
+
+# Get element names and sort them alphabetically
+element_names <- rownames(cor_matrix)
+sorted_elements <- sort(element_names, method = "radix")
+
+# Reorder the correlation matrix rows
+cor_matrix_sorted <- cor_matrix[sorted_elements, ]
+
+# Create heatmap of all correlations
+pheatmap(cor_matrix_sorted,
+         main = "Correlations: ICP-MS vs FT-NIRS PCs",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 6,
+         fontsize_col = 8,
+         angle_col = 45)
+
+```
+
+### Correlation Network
+
+```{r}
+library(igraph)
+library(ggraph)
+library(tidygraph)
+
+# Prepare the data
+cor_df <- as.data.frame(as.table(cor_matrix))
+names(cor_df) <- c("Element", "PC", "Correlation")
+
+# Filter for strong correlations
+cor_threshold <- 0.3  # Adjust this threshold as needed
+cor_df_filtered <- cor_df[abs(cor_df$Correlation) > cor_threshold, ]
+
+# Create a graph
+g <- graph_from_data_frame(cor_df_filtered, directed = FALSE)
+
+# Create a layout
+layout <- create_layout(g, layout = "fr")
+
+# Plot
+ggraph(layout) +
+  geom_edge_link(aes(edge_alpha = abs(Correlation), edge_width = abs(Correlation), color = Correlation)) +
+  geom_node_point(aes(color = name %in% unique(cor_df_filtered$PC)), size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  scale_edge_colour_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  scale_edge_alpha(range = c(0.1, 1)) +
+  scale_edge_width(range = c(0.5, 2)) +
+  scale_color_manual(values = c("orange", "purple"), guide = "none") +
+  theme_void() +
+  labs(title = "Correlation Network: ICP-MS Elements vs FT-NIRS PCs",
+       edge_alpha = "Absolute Correlation",
+       edge_width = "Absolute Correlation",
+       edge_color = "Correlation")
+
+# If you want to save the plot
+# ggsave("correlation_network.png", width = 12, height = 10, dpi = 300)
+```
+
+### Dendrogram/Hierarchical Cluster
+
+```{r}
+library(dendextend)
+
+# Perform hierarchical clustering
+hc <- hclust(dist(cor_matrix))
+
+# Create dendrogram
+dend <- as.dendrogram(hc)
+
+# Customize the dendrogram
+dend <- set(dend, "labels_cex", 0.6)  # Reduce label size
+dend <- set(dend, "branches_lwd", 1.5)  # Increase branch line width
+
+# Color branches (this should work in most versions)
+dend <- color_branches(dend, k = 5)  # Color branches for 5 main clusters (adjust as needed)
+
+# Plot the dendrogram
+par(mar = c(5, 3, 3, 20))  # Adjust margins to make room for labels
+plot(dend, 
+     main = "Hierarchical Clustering of Elements",
+     horiz = TRUE,  # Horizontal orientation
+     nodePar = list(cex = .007),
+     axes = FALSE,  # Remove axes
+     leaflab = "perpendicular")  # Make leaf labels perpendicular to the branches
+
+# Add a scale bar
+axis(side = 1, line = -1.5, cex.axis = 0.8)
+
+```
+
+### CIRCLE CORRELATION CHORD
+
+```{r}
+library(circlize)
+
+# Prepare data for chord diagram
+chord_data <- cor_matrix
+chord_data[abs(chord_data) < 0.4] <- 0  # Set weak correlations to 0
+
+# Get the actual names from the data and sort them
+actual_vars <- union(rownames(chord_data), colnames(chord_data))
+sorted_vars <- sort(actual_vars)
+
+# Clear any existing circular plot
+circos.clear()
+
+# Create chord diagram with sorted variables
+chordDiagram(chord_data, 
+             transparency = 0.5,
+             col = colorRamp2(c(-1, 0, 1), c("blue", "white", "red")),
+             annotationTrack = "grid", # This removes the default labels
+             preAllocateTracks = list(track.height = 0.1),
+             order = sorted_vars) # Use the sorted order here
+
+title("Correlation Chord Diagram")
+
+# Add the links
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim = get.cell.meta.data("xlim")
+  ylim = get.cell.meta.data("ylim")
+  sector.name = get.cell.meta.data("sector.index")
+  circos.text(mean(xlim), ylim[1], sector.name, facing = "clockwise",
+              niceFacing = TRUE, cex = 0.6, srt = 0)
+}, bg.border = NA)
+
+```
+
+
+
+### random plotting code for CCora
+
+```{r}
+# Get the loadings for the first 10 PCs
+pc_loadings <- pca_ftnirs$rotation[, 1:10]
+
+# Function to get top contributing wavelengths
+top_wavelengths <- function(loadings, n = 5) {
+  top_indices <- order(abs(loadings), decreasing = TRUE)[1:n]
+  return(data.frame(
+    wavelength = as.numeric(names(loadings)[top_indices]),
+    loading = loadings[top_indices]
+  ))
+}
+
+# Print top contributing wavelengths for PC3, PC8, and PC9
+print("Top 5 contributing wavelengths for PC3:")
+print(top_wavelengths(pc_loadings[,3]))
+
+print("Top 5 contributing wavelengths for PC8:")
+print(top_wavelengths(pc_loadings[,8]))
+
+print("Top 5 contributing wavelengths for PC9:")
+print(top_wavelengths(pc_loadings[,9]))
+
+
+
+
+# Extract scores
+x_scores <- cca_result$Cx[, 1:6]
+y_scores <- cca_result$Cy[, 1:6]
+
+# Create a scatter plot
+plot(x_scores[,5], y_scores[,5], 
+     xlab = "First Canonical Variate (ICP-MS)", 
+     ylab = "First Canonical Variate (FT-NIRS PCs)",
+     main = "First vs Second Canonical Variate",
+     pch = 19, col = "blue")
+
+# Add labels for each point
+text(x_scores[,1], y_scores[,1], labels = rownames(ccora_x), pos = 3, cex = 0.7)
+
+# Add a diagonal line for reference
+abline(0, 1, col = "red", lty = 2)
+
+
+
+print("Top 5 ICP-MS correlations with second canonical variate:")
+print(head(icp_ms_correlations[order(-abs(icp_ms_correlations[,2])),2, drop = FALSE], 5))
+
+print("Top 5 FT-NIRS PC correlations with second canonical variate:")
+print(head(ftnirs_pc_correlations[order(-abs(ftnirs_pc_correlations[,2])),2, drop = FALSE], 5))
+
+print("Top 5 ICP-MS correlations with third canonical variate:")
+print(head(icp_ms_correlations[order(-abs(icp_ms_correlations[,3])),3, drop = FALSE], 5))
+
+print("Top 5 FT-NIRS PC correlations with third canonical variate:")
+print(head(ftnirs_pc_correlations[order(-abs(ftnirs_pc_correlations[,3])),3, drop = FALSE], 5))
+
+
+
+```
+
+# ------MODELING --------
+### Quick modelling elemental data
+
+```{r}
+library(dplyr)
+library(prospectr)
+library(mgcv)
+library(MuMIn)
+library(caret)
+library(pls)
+
+model_element <- function(df, element) {
+  # Preprocess data
+  df <- df %>% 
+    select(all_of(element), everything()) %>%
+    filter(complete.cases(.))
+  spec_cols <- 70:ncol(df)
+  # Split data
+  set.seed(123)
+  train_index <- createDataPartition(df[[element]], p = 0.6, list = FALSE)
+  train_data <- df[train_index, ]
+  test_data <- df[-train_index, ]
+  
+  # PCA
+  pca_model <- preProcess(train_data[, spec_cols], method = c("pca", "center"), pcaComp = 10)
+  train_pc <- predict(pca_model, train_data[, spec_cols])
+  test_pc <- predict(pca_model, test_data[, spec_cols])
+  
+  train_pc <- cbind(train_pc, train_data[, 1:(spec_cols[1]-1)])
+  test_pc <- cbind(test_pc, test_data[, 1:(spec_cols[1]-1)])
+  
+  # Linear Models
+  global_lm <- lm(as.formula(paste(element, "~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10")), data = train_pc)
+  dredge_lm <- dredge(global_lm)
+  top5_lm <- get.models(dredge_lm, subset = 1:5)
+  
+  # GAM Models
+  global_gam <- gam(as.formula(paste(element, "~ s(PC1,k=4) + s(PC2,k=4) + s(PC3,k=4) + s(PC4,k=4) + s(PC5,k=4) + s(PC6,k=4)")), data = train_pc)
+  dredge_gam <- dredge(global_gam)
+  top5_gam <- get.models(dredge_gam, subset = 1:5)
+  
+  # Evaluate models
+  results <- data.frame(Model = character(), R2 = numeric(), RMSE = numeric())
+  
+  for (i in 1:5) {
+    # Linear Models
+    preds_lm <- predict(top5_lm[[i]], newdata = test_pc)
+    r2_lm <- 1 - sum((test_pc[[element]] - preds_lm)^2) / sum((test_pc[[element]] - mean(test_pc[[element]]))^2)
+    rmse_lm <- sqrt(mean((test_pc[[element]] - preds_lm)^2))
+    results <- rbind(results, data.frame(Model = paste0("Linear ", i), R2 = r2_lm, RMSE = rmse_lm))
+    
+    # GAM Models
+    preds_gam <- predict(top5_gam[[i]], newdata = test_pc)
+    r2_gam <- 1 - sum((test_pc[[element]] - preds_gam)^2) / sum((test_pc[[element]] - mean(test_pc[[element]]))^2)
+    rmse_gam <- sqrt(mean((test_pc[[element]] - preds_gam)^2))
+    results <- rbind(results, data.frame(Model = paste0("GAM ", i), R2 = r2_gam, RMSE = rmse_gam))
+  }
+  
+  # PLS Model
+  pls_model <- pls(train_data[, spec_cols], train_data[[element]], scale = FALSE, center = TRUE, ncomp = 10, y.test = test_data[[element]],x.test = test_data[, spec_cols])
+  ncomp <- pls_model$ncomp.selected
+  preds_pls <- predict(pls_model, newdata = test_data[, spec_cols], ncomp = pls_model$ncomp)
+  r2_pls <- pls_model$testres$r2[ncomp]
+  rmse_pls <- pls_model$testres$rmse[ncomp]
+  results <- rbind(results, data.frame(Model = "PLS", R2 = r2_pls, RMSE = rmse_pls))
+  
+  return(results)
+}
+```
+
+### +++++ Shiny: elements/spectra +++++
+### CURRENT NOT CALCULATING R2 AND RMSE CORRECTLY FOR PLS
+```{r}
+library(shiny)
+library(DT)
+library(dplyr)
+library(mdatools)
+library(mgcv)
+library(MuMIn)
+library(caret)
+library(ggplot2)
+library(gglm)
+library(gratia)
+
+# Assuming df_combined is already loaded in your environment
+
+# Define the elements (adjust as needed)
+elements <- names(df_combined)[3:68]  # Assuming elements are from column 3 to 68
+
+model_element <- function(data, element) {
+  # Preprocess data
+  df <- data %>% 
+    select(all_of(element), everything()) %>%
+    na.omit()  # Remove rows with NA values
+  
+  spec_cols <- (which(names(df) == element) + 1):ncol(df)
+  
+  # Convert spectral columns to numeric and remove any that fail
+  spec_data <- sapply(df[, spec_cols], function(x) as.numeric(as.character(x)))
+  spec_data <- spec_data[, !is.na(colSums(spec_data))]
+  
+  # Recreate df with only numeric spectral columns
+  df <- cbind(df[, 1:which(names(df) == element)], spec_data)
+  spec_cols <- (which(names(df) == element) + 1):ncol(df)
+  
+  # Split data
+  set.seed(123)
+  train_index <- createDataPartition(df[[element]], p = 0.6, list = FALSE)
+  train_data <- df[train_index, ]
+  test_data <- df[-train_index, ]
+  
+  # PCA
+  pca_model <- preProcess(train_data[, spec_cols], method = c("pca", "center"), pcaComp = 10)
+  train_pc <- predict(pca_model, train_data[, spec_cols])
+  test_pc <- predict(pca_model, test_data[, spec_cols])
+  
+  # Add the target element to the PC data
+  train_pc <- cbind(Target = train_data[[element]], train_pc)
+  test_pc <- cbind(Target = test_data[[element]], test_pc)
+  
+  # Linear Model
+  lm_model <- lm(Target ~ ., data = train_pc)
+  
+  # GAM Model
+  gam_model <- gam(Target ~ s(PC1, k=4) + s(PC2, k=4) + s(PC3, k=4) + s(PC4, k=4) + s(PC5, k=4), data = train_pc)
+  
+  # PLS Model using mdatools
+  pls_model <- pls(train_data[, spec_cols], train_data[[element]], ncomp = 10, cv = 1)
+  
+  # Evaluate models
+  results <- data.frame(Model = character(), R2 = numeric(), RMSE = numeric())
+  
+  # Linear Model evaluation
+  preds_lm <- predict(lm_model, newdata = test_pc)
+  r2_lm <- 1 - sum((test_pc$Target - preds_lm)^2) / sum((test_pc$Target - mean(test_pc$Target))^2)
+  rmse_lm <- sqrt(mean((test_pc$Target - preds_lm)^2))
+  results <- rbind(results, data.frame(Model = "Linear", R2 = r2_lm, RMSE = rmse_lm))
+  
+  # GAM Model evaluation
+  preds_gam <- predict(gam_model, newdata = test_pc)
+  r2_gam <- 1 - sum((test_pc$Target - preds_gam)^2) / sum((test_pc$Target - mean(test_pc$Target))^2)
+  rmse_gam <- sqrt(mean((test_pc$Target - preds_gam)^2))
+  results <- rbind(results, data.frame(Model = "GAM", R2 = r2_gam, RMSE = rmse_gam))
+  
+  # PLS Model evaluation
+  preds_pls <- predict(pls_model, test_data[, spec_cols])
+  r2_pls <- pls_model$calres$r2[10]  # R2 for 10 components
+  rmse_pls <- pls_model$calres$rmse[10]  # RMSE for 10 components
+  results <- rbind(results, data.frame(Model = "PLS", R2 = r2_pls, RMSE = rmse_pls))
+  
+  return(list(results = results, models = list(Linear = lm_model, GAM = gam_model, PLS = pls_model)))
+}
+
+ui <- fluidPage(
+  titlePanel("Element Modeling Explorer"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("element", "Choose an element:", choices = elements),
+      actionButton("process_all", "Process All Elements"),
+      hr(),
+      uiOutput("model_selection_ui"),
+      conditionalPanel(
+        condition = "input.selected_model == 'PLS'",
+        sliderInput("n_components", "Number of PLS Components:", min = 1, max = 10, value = 1, step = 1)
+      ),
+      conditionalPanel(
+        condition = "input.selected_model == 'GAM'",
+        selectInput("gam_plot_type", "GAM Plot Type:", 
+                    choices = c("Partial effects" = "partial", 
+                                "Model checking" = "check"))
+      )
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Results Table", DTOutput("resultsTable")),
+        tabPanel("Model Visualization", 
+                 plotOutput("model_plot", height = "600px"),
+                 verbatimTextOutput("model_summary"))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  results <- reactiveVal(NULL)
+  current_models <- reactiveVal(NULL)
+  
+  observeEvent(input$element, {
+    model_output <- model_element(df_combined, input$element)
+    results(model_output$results)
+    current_models(model_output$models)
+  })
+  
+  observeEvent(input$process_all, {
+    withProgress(message = 'Processing elements', value = 0, {
+      all_results <- lapply(elements, function(elem) {
+        incProgress(1/length(elements), detail = paste("Processing", elem))
+        res <- model_element(df_combined, elem)$results
+        res$Element <- elem
+        return(res)
+      })
+      results(do.call(rbind, all_results))
+    })
+  })
+  
+  output$resultsTable <- renderDT({
+    req(results())
+    datatable(results(), options = list(pageLength = 15, order = list(list(2, 'desc'))),
+              filter = 'top', extensions = 'Buttons', selection = 'none') %>%
+      formatRound(columns = c('R2', 'RMSE'), digits = 4)
+  })
+  
+  output$model_selection_ui <- renderUI({
+    req(results())
+    selectInput("selected_model", "Select Model to Visualize:", 
+                choices = c("Linear", "GAM", "PLS"))
+  })
+  
+  output$model_plot <- renderPlot({
+    req(input$selected_model, current_models())
+    model <- current_models()[[input$selected_model]]
+    
+    switch(input$selected_model,
+           "Linear" = gglm(model),
+           "GAM" = {
+             if(input$gam_plot_type == "partial") {
+               gratia::draw(model)
+             } else {
+               gratia::appraise(model)
+             }
+           },
+           "PLS" = {
+             plot(model, ncomp = input$n_components)
+           }
+    )
+  })
+  
+  output$model_summary <- renderPrint({
+    req(input$selected_model, current_models())
+    model <- current_models()[[input$selected_model]]
+    
+    switch(input$selected_model,
+           "Linear" = summary(model,ncomp = input$n_components),
+           "GAM" = summary(model),
+           "PLS" = summary(model))
+  })
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+
+
+
+# Plotting
+This section generates plots for each element of interest. For each element, it creates a boxplot showing the distribution across all otoliths, a histogram comparing the regional distributions, and a transect plot showing the concentration across the otolith for all transects. Outliers are removed for better plotting
+```{r fig.width=12, fig.height=8, results='asis', warning=FALSE, message=FALSE}
+remove_outliers <- function(x, na.rm = TRUE, ...) {
+  qnt <- quantile(x, probs=c(.25, .75), na.rm = na.rm, ...)
+  H <- 1.5 * IQR(x, na.rm = na.rm)
+  y <- x
+  y[x < (qnt[1] - H)] <- NA
+  y[x > (qnt[2] + H)] <- NA
+  y
+}
+```
+
+### Boxplot - Element
+
+```{r fig.width=12, fig.height=8, results='asis', warning=FALSE, message=FALSE}
+plot_element_boxplot <- function(data, element_name, otolith_range) {
+  data %>%
+    filter(as.numeric(str_extract(otolith_id, "\\d+")) %in% otolith_range) %>%
+    mutate(!!element_name := remove_outliers(.data[[element_name]])) %>%
+    ggplot(aes(x = segment, y = .data[[element_name]], fill = segment)) +
+    geom_boxplot(outlier.alpha = 0.5) +
+    facet_wrap(~otolith_id, scales = "free_y") +
+    scale_fill_viridis_d() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    labs(title = paste("Distribution of", element_name, "by Segment"),
+         subtitle = paste("Otoliths", min(otolith_range), "to", max(otolith_range)),
+         x = "Segment", y = element_name)
+}
+```
+
+### Histogram - Region
+
+```{r fig.width=12, fig.height=8, results='asis', warning=FALSE, message=FALSE}
+plot_region_histogram <- function(data, element_name) {
+  data %>%
+    mutate(!!element_name := remove_outliers(.data[[element_name]])) %>%
+    ggplot(aes(x = .data[[element_name]], fill = region)) +
+    geom_histogram(position = "dodge", bins = 30, alpha = 0.7) +
+    facet_wrap(~segment, scales = "free_y") +
+    scale_fill_viridis_d() +
+    theme_minimal() +
+    labs(title = paste("Distribution of", element_name, "by Region and Segment"),
+         x = element_name, y = "Count")
+}
+```
+
+### Heatmap - Elements
+
+```{r fig.width=12, fig.height=8, results='asis', warning=FALSE, message=FALSE}
+plot_element_heatmap <- function(data, element_name) {
+  data %>%
+    group_by(otolith_id, segment) %>%
+    summarise(mean_concentration = mean(.data[[element_name]], na.rm = TRUE)) %>%
+    ggplot(aes(x = segment, y = otolith_id, fill = mean_concentration)) +
+    geom_tile() +
+    scale_fill_viridis_c() +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = paste("Heatmap of", element_name, "Concentration"),
+         x = "Segment", y = "Otolith ID", fill = "Mean Concentration")
+}
+```
+
+### Element Correlograms
+
+```{r}
+# Define the order of elements
+element_order <- c("Ba138_ppm", "Ca43", "Mg24_ppm", "Mn55_ppm", "Sr86_ppm", "Sr87_ppm", "Sr88_ppm", "Zn66_ppm")
+
+create_correlation_plot <- function(data, segment_name) {
+  # Select only the numeric columns (elements) in the specified order
+  element_data <- data %>%
+    select(all_of(element_order))
+  
+  # Calculate correlation matrix
+  cor_matrix <- cor(element_data, use = "pairwise.complete.obs")
+  
+  # Create correlation plot
+  corrplot(cor_matrix, 
+           method = "color", 
+           type = "upper", 
+           order = "original",  # Use the original order of the correlation matrix
+           tl.col = "black",    # Set text label color to black for better visibility
+           tl.srt = 45,         # Rotate text labels 45 degrees
+           title = paste("Correlation Plot -", segment_name),
+           mar = c(0,0,2,0))    # Increase top margin for title
+}
+
+```
+
+### Data/Result Table
+
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, results='asis'}
+create_result_table <- function(data, caption) {
+  columns_to_display <- intersect(
+    c("otolith_id", "element", "segment", "n_transects", "p_value", "F_statistic", "df"),
+    names(data)
+  )
+
+  formatted_data <- data %>%
+    select(all_of(columns_to_display)) %>%
+    mutate(
+      p_value_original = p_value,
+      p_value = ifelse(is.na(p_value), "NA", formatC(p_value, format = "e", digits = 2)),
+      F_statistic = ifelse(is.na(F_statistic), "NA", round(F_statistic, 2)),
+      Significant = case_when(
+        is.na(p_value_original) ~ "NA",
+        p_value_original < 0.05 ~ "Yes",
+        TRUE ~ "No"
+      ),
+      p_value = cell_spec(p_value,
+                          color = case_when(
+                            is.na(p_value_original) ~ "black",
+                            p_value_original < 0.05 ~ "white",
+                            TRUE ~ "black"
+                          ),
+                          background = case_when(
+                            is.na(p_value_original) ~ "lightgrey",
+                            p_value_original < 0.05 ~ "#4CAF50",
+                            TRUE ~ "white"
+                          ),
+                          bold = !is.na(p_value_original) & p_value_original < 0.05)
+    ) %>%
+    select(-p_value_original)
+
+  DT::datatable(
+    formatted_data,
+    caption = caption,
+    escape = FALSE,
+    options = list(
+      pageLength = 25,
+      scrollX = TRUE,
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+    ),
+    extensions = 'Buttons',
+    filter = 'top',
+    rownames = FALSE
+  ) %>%
+    formatStyle(
+      'p_value',
+      backgroundColor = styleEqual(c("TRUE", "FALSE", "NA"), c('#4CAF50', 'white', 'lightgrey'))
+    ) %>%
+    formatStyle(
+      'Significant',
+      backgroundColor = styleEqual(c("Yes", "No", "NA"), c('#4CAF50', 'white', 'lightgrey')),
+      color = styleEqual(c("Yes", "No", "NA"), c('white', 'black', 'black'))
+    )
+}
+```
+
+
+#### Run Plots
+
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, results='asis'}
+elements_to_plot <- c("Ca43", "Sr86_ppm", "Sr87_ppm", "Sr88_ppm", "Ba138_ppm", "Zn66_ppm", "Mg24_ppm", "Mn55_ppm")
+
+for (element in elements_to_plot) {
+  cat("##", element, "\n\n")
+
+  cat("### Distribution Boxplot (Otoliths 1-20)\n\n")
+  print(plot_element_boxplot(df_ICP_filt, element, 1:20))
+  cat("\n\n")
+
+  cat("### Distribution Boxplot (Otoliths 21-40)\n\n")
+  print(plot_element_boxplot(df_ICP_filt, element, 21:40))
+  cat("\n\n")
+
+  cat("### Regional Distribution\n\n")
+  print(plot_region_histogram(df_ICP_filt, element))
+  cat("\n\n")
+
+  cat("### Concentration Heatmap\n\n")
+  print(plot_element_heatmap(df_ICP_filt, element))
+  cat("\n\n")
+}
+
+# # Generate correlation plots for each segment
+# cat("## Element Correlations\n\n")
+
+# for (segment in unique(df_ICP_filt$segment)) {
+#   cat(paste("### Correlation Plot -", segment, "\n\n"))
+#   
+#   segment_data <- df_ICP_filt %>%
+#     filter(segment == !!segment)
+#   
+#   print(create_correlation_plot(segment_data, segment))
+#   
+#   cat("\n\n")
+# }
+
+# Generate overall correlation plot
+# cat("### Overall Correlation Plot\n\n")
+# print(create_correlation_plot(df_ICP_filt, "All Segments"))
+```
+
+
+```{r}
+library(shiny)
+library(DT)
+library(dplyr)
+library(mdatools)
+library(mgcv)
+library(MuMIn)
+library(caret)
+library(ggplot2)
+library(gglm)
+library(gratia)
+
+
+model_element <- function(df, element) {
+  print("Starting model_element function")
+  
+  # Preprocess data
+  df <- df %>% 
+    select(all_of(element), everything()) %>%
+    filter(complete.cases(.))
+  spec_cols <- 70:ncol(df)
+  
+  print("Data preprocessed")
+  
+  # PCA
+  pca_temp <- pca(df[, spec_cols])
+  pc_df <- data.frame(PC1 = rep(0, nrow(df)))
+  for (i in 1:10) {
+    pc_df[, paste0("PC", i)] <- pca_temp$res$cal$scores[, i]
+  }
+  pc_df <- cbind(pc_df, df)
+  
+  print("PCA completed")
+  print(paste("Dimensions of pc_df:", dim(pc_df)[1], "x", dim(pc_df)[2]))
+  
+  # Linear Models
+  print("Starting Linear Models")
+  global_lm <- lm(as.formula(paste(element, "~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10")), data = pc_df)
+  options(na.action = "na.fail")
+  dredge_lm <- dredge(global_lm)
+  top5_lm <- get.models(dredge_lm, subset = 1:5)
+  
+  print("Linear Models completed")
+  
+  # GAM Models
+  print("Starting GAM Models")
+  global_gam <- gam(as.formula(paste(element, "~ s(PC1,k=4) + s(PC2,k=4) + s(PC3,k=4) + s(PC4,k=4) + s(PC5,k=4) + s(PC6,k=4)")), data = pc_df)
+  dredge_gam <- dredge(global_gam)
+  top5_gam_temp <- dredge_gam[1:5,]
+  
+  reconstruct_formula <- function(model_row) {
+    terms_used <- names(model_row)[!is.na(model_row)]
+    terms_used <- terms_used[!terms_used %in% c("(Intercept)", "df", "logLik", "AICc", "delta", "weight")]
+    if (length(terms_used) == 0) {
+      return(as.formula(paste(element, "~ 1")))  # Return intercept-only model if no terms
+    }
+    as.formula(paste(element, "~", paste(terms_used, collapse = " + ")))
+  }
+  top5_gam <- lapply(1:5, function(i) {
+    tryCatch({
+      gam(reconstruct_formula(top5_gam_temp[i, ]), data = pc_df)
+    }, error = function(e) {
+      print(paste("Error in GAM model", i, ":", e$message))
+      return(NULL)
+    })
+  })
+  top5_gam <- top5_gam[!sapply(top5_gam, is.null)]  # Remove any NULL models
+  
+  print("GAM Models completed")
+  
+  options(na.action = "na.omit")  # Reset the option to default
+  
+  # Split data for evaluation
+  set.seed(123)
+  train_index <- createDataPartition(pc_df[[element]], p = 0.6, list = FALSE)
+  train_pc <- pc_df[train_index, ]
+  test_pc <- pc_df[-train_index, ]
+  
+  # Evaluate models
+  results <- data.frame(Model = character(), R2 = numeric(), RMSE = numeric())
+  
+  for (i in 1:length(top5_lm)) {
+    # Linear Models
+    preds_lm <- predict(top5_lm[[i]], newdata = test_pc)
+    r2_lm <- 1 - sum((test_pc[[element]] - preds_lm)^2) / sum((test_pc[[element]] - mean(test_pc[[element]]))^2)
+    rmse_lm <- sqrt(mean((test_pc[[element]] - preds_lm)^2))
+    results <- rbind(results, data.frame(Model = paste0("Linear ", i), R2 = r2_lm, RMSE = rmse_lm))
+  }
+  
+  for (i in 1:length(top5_gam)) {
+    # GAM Models
+    preds_gam <- predict(top5_gam[[i]], newdata = test_pc)
+    r2_gam <- 1 - sum((test_pc[[element]] - preds_gam)^2) / sum((test_pc[[element]] - mean(test_pc[[element]]))^2)
+    rmse_gam <- sqrt(mean((test_pc[[element]] - preds_gam)^2))
+    results <- rbind(results, data.frame(Model = paste0("GAM ", i), R2 = r2_gam, RMSE = rmse_gam))
+  }
+  
+  print("Model evaluation completed")
+  
+  # PLS Model
+  print("Starting PLS Model")
+  tryCatch({
+    # Prepare data for PLS
+    X_train <- as.matrix(df[train_index, spec_cols])
+    y_train <- as.vector(df[train_index, element])
+    X_test <- as.matrix(df[-train_index, spec_cols])
+    y_test <- as.vector(df[-train_index, element])
+    
+    # Regular PLS
+    pls_model <- pls(X_train, y_train,
+                     scale = FALSE, center = TRUE, cv = 1,
+                     x.test = X_test,
+                     y.test = y_test)
+    
+    ncomp <- pls_model$ncomp.selected
+    r2_pls <- pls_model$testres$r2[[ncomp]]
+    rmse_pls <- pls_model$testres$rmse[[ncomp]]
+    
+    # VIP-filtered PLS
+    vip <- as.data.frame(vipscores(pls_model))
+    vip_cols <- which(vip$V1 >= 0.5)
+    pls_vip_model <- pls(X_train[, vip_cols], y_train,
+                         scale = FALSE, center = TRUE, cv = 1,
+                         x.test = X_test[, vip_cols],
+                         y.test = y_test)
+    
+    ncomp_vip <- pls_vip_model$ncomp.selected
+    r2_pls_vip <- pls_vip_model$testres$r2[[ncomp_vip]]
+    rmse_pls_vip <- pls_vip_model$testres$rmse[[ncomp_vip]]
+    
+    # Add results to the summary table
+    results <- rbind(results, 
+                     data.frame(Model = "PLS", R2 = r2_pls, RMSE = rmse_pls),
+                     data.frame(Model = "PLS-VIP", R2 = r2_pls_vip, RMSE = rmse_pls_vip))
+    
+    print("PLS Model completed")
+    print(paste("PLS R2:", round(r2_pls, 4)))
+    print(paste("PLS RMSE:", round(rmse_pls, 4)))
+    print(paste("PLS-VIP R2:", round(r2_pls_vip, 4)))
+    print(paste("PLS-VIP RMSE:", round(rmse_pls_vip, 4)))
+  }, error = function(e) {
+    print(paste("Error in PLS model:", e$message))
+    results <- rbind(results, 
+                     data.frame(Model = "PLS", R2 = NA, RMSE = NA),
+                     data.frame(Model = "PLS-VIP", R2 = NA, RMSE = NA))
+  })
+  
+  return(list(results = results, 
+              models = list(Linear = top5_lm, 
+                            GAM = top5_gam, 
+                            PLS = if(exists("pls_model")) pls_model else NULL, 
+                            PLS_VIP = if(exists("pls_vip_model")) pls_vip_model else NULL)))
+}
+
+
+
+ui <- fluidPage(
+  titlePanel("Element Modeling Explorer"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("element", "Choose an element:", choices = elements),
+      actionButton("process_all", "Process All Elements"),
+      hr(),
+      uiOutput("model_selection_ui"),
+      conditionalPanel(
+        condition = "input.selected_model == 'PLS'",
+        sliderInput("n_components", "Number of PLS Components:", min = 1, max = 10, value = 1, step = 1)
+      ),
+      conditionalPanel(
+        condition = "input.selected_model == 'GAM' || input.selected_model == 'Linear'",
+        selectInput("model_number", "Model Number:", choices = 1:5)
+      ),
+      conditionalPanel(
+        condition = "input.selected_model == 'GAM'",
+        selectInput("gam_plot_type", "GAM Plot Type:", 
+                    choices = c("Partial effects" = "partial", 
+                                "Model checking" = "check"))
+      )
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Results Table", DTOutput("resultsTable")),
+        tabPanel("Model Visualization", 
+                 plotOutput("model_plot", height = "600px"),
+                 verbatimTextOutput("model_summary"))
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  results <- reactiveVal(NULL)
+  current_models <- reactiveVal(NULL)
+  
+  observeEvent(input$element, {
+    model_output <- model_element(df_combined, input$element)
+    results(model_output$results)
+    current_models(model_output$models)
+  })
+  
+  observeEvent(input$process_all, {
+    withProgress(message = 'Processing elements', value = 0, {
+      all_results <- lapply(elements, function(elem) {
+        incProgress(1/length(elements), detail = paste("Processing", elem))
+        res <- model_element(df_combined, elem)$results
+        res$Element <- elem
+        return(res)
+      })
+      results(do.call(rbind, all_results))
+    })
+  })
+  
+  output$resultsTable <- renderDT({
+    req(results())
+    datatable(results(), options = list(pageLength = 15, order = list(list(2, 'desc'))),
+              filter = 'top', extensions = 'Buttons', selection = 'none') %>%
+      formatRound(columns = c('R2', 'RMSE'), digits = 4)
+  })
+  
+  output$model_selection_ui <- renderUI({
+    req(results())
+    selectInput("selected_model", "Select Model to Visualize:", 
+                choices = c("Linear", "GAM", "PLS"))
+  })
+  
+  output$model_plot <- renderPlot({
+    req(input$selected_model, current_models())
+    models <- current_models()[[input$selected_model]]
+    
+    switch(input$selected_model,
+           "Linear" = {
+             model <- models[[as.numeric(input$model_number)]]
+             gglm(model)
+           },
+           "GAM" = {
+             model <- models[[as.numeric(input$model_number)]]
+             if(input$gam_plot_type == "partial") {
+               gratia::draw(model)
+             } else {
+               gratia::appraise(model)
+             }
+           },
+           "PLS" = {
+             plot(models, ncomp = input$n_components)
+           }
+    )
+  })
+  
+  output$model_summary <- renderPrint({
+    req(input$selected_model, current_models())
+    models <- current_models()[[input$selected_model]]
+    
+    switch(input$selected_model,
+           "Linear" = summary(models[[as.numeric(input$model_number)]]),
+           "GAM" = summary(models[[as.numeric(input$model_number)]]),
+           "PLS" = summary(models, ncomp = input$n_components))
+  })
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+
+# ------------ old code ---------------
+in case I need to look at it again
+```{r eval=FALSE, include=FALSE}
+
+### Line Chart - Original Data vs Cutoffs
+Trying to see if my cutoff values make sense
+```{r eval=FALSE, include=FALSE}
+library(ggplot2)
+library(dplyr)
+
+# Your detect_otolith_segments function here (as provided in your message)
+
+# Function to plot original and filtered data for a single transect and multiple elements
+plot_original_and_filtered <- function(data, transect_id, elements) {
+  # Filter data for the selected transect
+  plot_data <- data %>%
+    filter(transect_id == !!transect_id)
+  
+  # Apply boundary detection
+  boundaries <- detect_otolith_segments(plot_data$Ca43, plot_data$Cu63_ppm)
+  start_time <- plot_data$time[boundaries$start]
+  end_time <- plot_data$time[boundaries$end]
+  
+  # Function to create a plot for a single element
+  create_element_plot <- function(element) {
+    # Plot with all values and cutoffs
+    plot_all <- ggplot(plot_data) +
+      geom_line(aes(x = time, y = !!sym(element)), color = "blue") +
+      geom_vline(xintercept = start_time, color = "red", linetype = "dashed") +
+      geom_vline(xintercept = end_time, color = "red", linetype = "dashed") +
+      labs(title = paste("All Values for", element, "in Transect", transect_id),
+           subtitle = "Red dashed lines indicate cutoffs",
+           x = "Time Elapsed",
+           y = "Concentration") +
+      theme_minimal()
+    
+    # Plot with filtered values
+    plot_filtered <- plot_data %>%
+      filter(time >= start_time & time <= end_time) %>%
+      ggplot(aes(x = time, y = !!sym(element))) +
+      geom_line(color = "blue") +
+      labs(title = paste("Filtered Values for", element, "in Transect", transect_id),
+           x = "Time Elapsed",
+           y = "Concentration") +
+      theme_minimal()
+    
+    # Combine plots vertically
+    cowplot::plot_grid(plot_all, plot_filtered, ncol = 1)
+  }
+  
+  # Create and print plots for each element
+  for (element in elements) {
+    plot <- create_element_plot(element)
+    print(plot)
+    # Add a prompt to continue to the next plot
+    if (element != elements[length(elements)]) {
+      readline(prompt = "Press [Enter] to see the next plot...")
+    }
+  }
+}
+
+# Example usage
+transect_id_to_plot <- "oto31-3"  # Replace with the actual transect ID you want to plot
+elements_to_plot <- c("Ca43", "Cu63_ppm")  # Add or remove elements as needed
+
+# Create and print the plots
+plot_original_and_filtered(df, transect_id_to_plot, elements_to_plot)
+
+
+### Find Boundaries
+```{r}
+# Improved Boundary Detection and Segmentation using both Ca43 and Cu63_ppm
+# detect_otolith_segments <- function(ca43_data, cu63_data, window_size = 7, ca_threshold_factor = 0.4, cu_threshold_factor = 1.5) {
+#   # Smooth the data using rolling median
+#   smoothed_ca43 <- zoo::rollmedian(ca43_data, k = window_size, fill = "extend")
+#   smoothed_cu63 <- zoo::rollmedian(cu63_data, k = window_size, fill = "extend")
+# 
+#   n <- length(smoothed_ca43)
+#   baseline_range <- round(n * 0.3):round(n * 0.7)
+#   
+#   # Calculate baseline and thresholds for Ca43
+#   baseline_ca43 <- median(smoothed_ca43[baseline_range])
+#   ca_threshold <- baseline_ca43 * ca_threshold_factor
+# 
+#   # Calculate baseline and thresholds for Cu63
+#   baseline_cu63 <- median(smoothed_cu63[baseline_range])
+#   cu_threshold <- baseline_cu63 * cu_threshold_factor
+# 
+#   # Determine start index based on Ca43 and Cu63 thresholds
+#   start_idx_ca43 <- which(smoothed_ca43 > ca_threshold)[1]
+#   start_idx_cu63 <- which(smoothed_cu63 < cu_threshold)[1]
+#   start_idx <- max(1, start_idx_ca43, start_idx_cu63)
+# 
+#   # Determine end index based on Ca43 and Cu63 thresholds
+#   end_idx_ca43 <- n - which(rev(smoothed_ca43) > ca_threshold)[1] + 1
+#   end_idx_cu63 <- n - which(rev(smoothed_cu63) < cu_threshold)[1] + 1
+#   end_idx <- min(n, end_idx_ca43, end_idx_cu63)
+# 
+#   return(list(start = start_idx, end = end_idx))
+# }
+
+
+# # Apply boundary detection to all transects using both Ca43 and Cu63_ppm
+# df_segmented <- df %>%
+#   group_by(transect_id) %>%
+#   mutate(
+#     # First smooth the Ca43 data using rolling median
+#     smoothed_Ca43 = zoo::rollmedian(Ca43, k = 2, fill = "extend"),
+#     # Apply quantile filtering to smoothed data
+#     threshold = quantile(smoothed_Ca43, 0.6, na.rm = TRUE),
+#     valid_points = smoothed_Ca43 >= threshold,
+#     start = min(which(valid_points)),
+#     end = max(which(valid_points)),
+#     row_num = row_number(),
+#     segment = case_when(
+#       row_num < start + 0.2 * (end - start) ~ "core",
+#       row_num > end - 0.2 * (end - start) ~ "edge",
+#       TRUE ~ "middle"
+#     )
+#   ) %>%
+#   filter(row_num >= start & row_num <= end) %>%
+#   # Remove temporary columns
+#   select(-threshold, -valid_points, -row_num, -start, -end, -smoothed_Ca43) %>%
+#   ungroup()
+
+
+
+# df_segmented <- df %>%
+#   group_by(transect_id) %>%
+#   mutate(
+#     threshold = quantile(Ca43, 0.6, na.rm = TRUE),
+#     valid_points = Ca43 >= threshold,
+#     start = min(which(valid_points)),
+#     end = max(which(valid_points)),
+#     row_num = row_number(),
+#     segment = case_when(
+#       row_num < start + 0.2 * (end - start) ~ "core",
+#       row_num > end - 0.2 * (end - start) ~ "edge",
+#       TRUE ~ "middle"
+#     )
+#   ) %>%
+#   filter(row_num >= start & row_num <= end) %>%
+#   select(-threshold, -valid_points, -row_num, -start, -end) %>%
+#   ungroup()
+
+
+# 
+# df_segmented <- df %>%
+#   group_by(transect_id) %>%
+#   mutate(
+#     boundaries = list(detect_otolith_segments(Ca43, Cu63_ppm)),
+#     start = map_dbl(boundaries, ~ .x$start),
+#     end = map_dbl(boundaries, ~ .x$end),
+#     row_num = row_number(),
+#     total_rows = n(),
+#     segment = case_when(
+#       row_num < start + 0.2 * (end - start) ~ "core",
+#       row_num > end - 0.2 * (end - start) ~ "edge",
+#       TRUE ~ "middle"
+#     )
+#   ) %>%
+#   filter(row_num >= start & row_num <= end) %>%
+#   select(-boundaries, -row_num, -total_rows, -start, -end) %>%
+#   ungroup()
+
+
+# Load Data and Preprocess
+load_and_clean_data <- function(file_path) {
+  data <- readRDS(file_path)
+  valid_indices <- setdiff(30:184, c(grep("oto10-2", names(data)), grep("oto30-", names(data))))
+  
+  cleaned_data <- data[valid_indices] %>%
+    bind_rows(.id = "transect_id") %>%
+    mutate(
+      otolith_id = str_extract(transect_id, "oto\\d+"),
+      transect_num = as.integer(str_extract(transect_id, "\\d+$")),
+      region = case_when(
+        as.integer(str_extract(otolith_id, "\\d+")) %in% c(6:10, 16:25, 31:35) ~ "Kodiak",
+        TRUE ~ "Shumagin"
+      )
+    )
+  
+  return(cleaned_data)
+}
+df <- load_and_clean_data("RDS_dataframes/ICP-MS_clean.RDS")
+```
+
+
+
+#### Results tables
+
+```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, results='asis'}
+# Statistical Results
+cat("## Statistical Results\n\n")
+
+cat("### Transect Comparison Results\n\n")
+create_result_table(analysis_results$transect_comparison, "Comparison of Element Concentrations Across Transects")
+cat("\n\n")
+
+cat("### Otolith Comparison Results\n\n")
+create_result_table(analysis_results$otolith_comparison, "Comparison of Element Concentrations Across Otoliths")
+cat("\n\n")
+
+cat("### Region Comparison Results\n\n")
+create_result_table(analysis_results$region_comparison, "Comparison of Element Concentrations Between Regions")
+cat("\n\n")
+```
+
+### Statistical Analysis
+
+```{r eval=FALSE, include=FALSE}
+# Statistical Analysis
+safe_test <- function(test_func, ...) {
+  tryCatch(
+    test_func(...),
+    error = function(e) {
+      warning(paste("Error in test:", e$message))
+      return(data.frame(p.value = NA, statistic = NA, parameter = NA))
+    }
+  )
+}
+```
+
+### Transects
+```{r eval=FALSE, include=FALSE}
+compare_transects <- function(data) {
+  data %>%
+    pivot_longer(cols = c(Ca43, ends_with("_ppm")),
+                 names_to = "element",
+                 values_to = "value") %>%
+    group_by(otolith_id, element, segment) %>%
+    summarise(
+      n_transects = n_distinct(transect_id),
+      test_result = if(n_transects > 1) {
+        list(safe_test(aov, value ~ factor(transect_id)) %>% summary() %>% .[[1]])
+      } else {
+        list(data.frame(p.value = NA, statistic = NA, parameter = NA))
+      },
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p_value = map_dbl(test_result, ~ .x$`Pr(>F)`[1]),
+      F_statistic = map_dbl(test_result, ~ .x$`F value`[1]),
+      df = map_dbl(test_result, ~ .x$Df[1])
+    ) %>%
+    select(otolith_id, element, segment, n_transects, p_value, F_statistic, df)
+}
+```
+
+### Otoliths
+
+```{r eval=FALSE, include=FALSE}
+compare_otoliths <- function(data) {
+  data %>%
+    pivot_longer(cols = c(Ca43, ends_with("_ppm")),
+                 names_to = "element",
+                 values_to = "value") %>%
+    group_by(element, segment) %>%
+    summarise(
+      test_result = list(safe_test(aov, value ~ factor(otolith_id)) %>% summary() %>% .[[1]]),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p_value = map_dbl(test_result, ~ .x$`Pr(>F)`[1]),
+      F_statistic = map_dbl(test_result, ~ .x$`F value`[1]),
+      df = map_dbl(test_result, ~ .x$Df[1])
+    ) %>%
+    select(element, segment, p_value, F_statistic, df)
+}
+```
+
+### Regions
+
+```{r eval=FALSE, include=FALSE}
+compare_regions <- function(data) {
+  data %>%
+    pivot_longer(cols = c(Ca43, ends_with("_ppm")),
+                 names_to = "element",
+                 values_to = "value") %>%
+    group_by(element, segment) %>%
+    summarise(
+      test_result = list(safe_test(aov, value ~ factor(region)) %>% summary() %>% .[[1]]),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p_value = map_dbl(test_result, ~ .x$`Pr(>F)`[1]),
+      F_statistic = map_dbl(test_result, ~ .x$`F value`[1]),
+      df = map_dbl(test_result, ~ .x$Df[1])
+    ) %>%
+    select(element, segment, p_value, F_statistic, df)
+}
+```
+
+#### Run Analysis
+```{r eval=FALSE, include=FALSE}
+analysis_results <- list(
+  transect_comparison = compare_transects(df_ICP_filt),
+  otolith_comparison = compare_otoliths(df_ICP_filt),
+  region_comparison = compare_regions(df_ICP_filt)
+)
+```
+
