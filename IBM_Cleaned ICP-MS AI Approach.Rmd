@@ -80,7 +80,7 @@ This section implements an improved method for detecting the boundaries of the o
 
 ```{r}
 # After getting manual_adjustments.csv:
-manual_adj <- read.csv("manual_adjustments.csv")
+manual_adj <- read.csv("metadata/manual_adjustments.csv")
 
 # Create the segmented dataset incorporating manual adjustments
 df_ICP_filt <- df_ICP %>%
@@ -292,6 +292,260 @@ df_combined <- df_ICP_avg %>%
 
 rm(df_ICP,ft_nirs_wavenumbers)
 ```
+
+# Code to run analysis on line transects?
+
+```{r}
+library(tidyverse)
+
+# Function to calculate the position along a line
+calculate_position_along_line <- function(point, start, end) {
+  # Calculate vector from start to end
+  line_vector <- c(end$x - start$x, end$y - start$y)
+  
+  # Calculate vector from start to point
+  point_vector <- c(point$x - start$x, point$y - start$y)
+  
+  # Calculate projection of point vector onto line vector
+  projection <- sum(point_vector * line_vector) / sum(line_vector^2)
+  
+  # Return the proportion along the line (0 = start, 1 = end)
+  return(max(0, min(1, projection)))
+}
+
+# Function to process annotation data and return time ranges
+process_annotations <- function(line_data, max_time) {
+  start_point <- list(x = line_data$start_x, y = line_data$start_y)
+  end_point <- list(x = line_data$end_x, y = line_data$end_y)
+  
+  # Create points for each annotation (handling NAs)
+  result <- list()
+  
+  # Process standard annotations
+  for (annotation_type in c("start", "core", "end")) {
+    x_col <- paste0(annotation_type, "_annotation_x")
+    y_col <- paste0(annotation_type, "_annotation_y")
+    
+    if (!is.na(line_data[[x_col]]) && !is.na(line_data[[y_col]])) {
+      point <- list(x = line_data[[x_col]], y = line_data[[y_col]])
+      pos <- calculate_position_along_line(point, start_point, end_point)
+      result[[paste0(annotation_type, "_time")]] <- pos * max_time
+    } else {
+      result[[paste0(annotation_type, "_time")]] <- NA
+    }
+  }
+  
+  # Process data quality annotations
+  for (annotation_type in c("data_start", "data_end")) {
+    x_col <- paste0(annotation_type, "_annotation_x")
+    y_col <- paste0(annotation_type, "_annotation_y")
+    
+    if (!is.na(line_data[[x_col]]) && !is.na(line_data[[y_col]])) {
+      point <- list(x = line_data[[x_col]], y = line_data[[y_col]])
+      pos <- calculate_position_along_line(point, start_point, end_point)
+      result[[paste0(annotation_type, "_time")]] <- pos * max_time
+    } else {
+      # If data quality markers aren't set, use otolith start/end as defaults
+      if (annotation_type == "data_start" && !is.na(result$start_time)) {
+        result$data_start_time <- result$start_time
+      } else if (annotation_type == "data_end" && !is.na(result$end_time)) {
+        result$data_end_time <- result$end_time
+      } else {
+        result[[paste0(annotation_type, "_time")]] <- NA
+      }
+    }
+  }
+  
+  # Add quality information
+  result$quality <- line_data$quality
+  result$notes <- line_data$notes
+  
+  return(result)
+}
+
+# Main function to filter and process your data
+# Modified process_icp_data function
+process_icp_data <- function(df_ICP, annotations) {
+  # Check if annotations is a filename or dataframe
+  if (is.character(annotations) && length(annotations) == 1) {
+    # It's a filename
+    annotations <- read.csv(annotations)
+  } else if (!is.data.frame(annotations)) {
+    stop("annotations must be either a filename or a data frame")
+  }
+  
+  # Create a data frame to store the time ranges for each line
+  time_ranges <- data.frame(
+    line_name = character(),
+    quality = character(),
+    notes = character(),
+    otolith_start_time = numeric(),
+    core_time = numeric(),
+    otolith_end_time = numeric(),
+    data_start_time = numeric(),
+    data_end_time = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Process each line
+  for (i in 1:nrow(annotations)) {
+    # Get the line data
+    line_data <- annotations[i, ]
+    
+    # Determine the maximum time for this line
+    line_id <- line_data$line_name
+    
+    # Skip if this line isn't in the ICP data
+    if (!line_id %in% df_ICP$transect_id) {
+      warning(paste("Line", line_id, "not found in ICP data, skipping"))
+      next
+    }
+    
+    max_time <- max(df_ICP$time[df_ICP$transect_id == line_id])
+    
+    # Process the annotations
+    result <- process_annotations(line_data, max_time)
+    
+    # Add to the time_ranges data frame
+    time_ranges <- rbind(time_ranges, data.frame(
+      line_name = line_id,
+      quality = result$quality,
+      notes = result$notes,
+      otolith_start_time = result$start_time,
+      core_time = result$core_time,
+      otolith_end_time = result$end_time,
+      data_start_time = result$data_start_time,
+      data_end_time = result$data_end_time,
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # Create a list to store filtered data frames
+  filtered_data <- list()
+  
+  # Process each line
+  for (i in 1:nrow(time_ranges)) {
+    # Get the time range data
+    range_data <- time_ranges[i, ]
+    
+    # Skip poor quality transects
+    if (range_data$quality == "poor") {
+      message(paste("Skipping poor quality line:", range_data$line_name))
+      next
+    }
+    
+    # Filter the data frame
+    line_data <- df_ICP[df_ICP$transect_id == range_data$line_name, ]
+    
+    # Only use data between data_start and data_end
+    if (!is.na(range_data$data_start_time) && !is.na(range_data$data_end_time)) {
+      filtered_line_data <- line_data[
+        line_data$time >= range_data$data_start_time & 
+          line_data$time <= range_data$data_end_time, 
+      ]
+      
+      # Skip if no data points remain after filtering
+      if (nrow(filtered_line_data) == 0) {
+        message(paste("No data points remain after filtering for line:", range_data$line_name))
+        next
+      }
+      
+      # Add columns with position information
+      filtered_line_data$position_from_core <- filtered_line_data$time - range_data$core_time
+      filtered_line_data$transect_quality <- range_data$quality
+      
+      # Store in the list
+      filtered_data[[range_data$line_name]] <- filtered_line_data
+    } else {
+      message(paste("Missing data start/end markers for line:", range_data$line_name))
+    }
+  }
+  
+  # Combine all filtered data
+  if (length(filtered_data) > 0) {
+    all_filtered_data <- bind_rows(filtered_data)
+    
+    # Add normalized position information
+    all_filtered_data <- all_filtered_data %>%
+      group_by(transect_id) %>%
+      mutate(
+        # Calculate distances as percentages
+        distance_from_core_pct = case_when(
+          position_from_core >= 0 ~ 
+            position_from_core / (
+              time_ranges$otolith_end_time[match(transect_id, time_ranges$line_name)] - 
+                time_ranges$core_time[match(transect_id, time_ranges$line_name)]
+            ) * 100,
+          TRUE ~ 
+            position_from_core / (
+              time_ranges$core_time[match(transect_id, time_ranges$line_name)] - 
+                time_ranges$otolith_start_time[match(transect_id, time_ranges$line_name)]
+            ) * -100
+        ),
+        # Create region labels
+        otolith_region = case_when(
+          distance_from_core_pct < -50 ~ "Inner Core",
+          distance_from_core_pct < 0 ~ "Core",
+          distance_from_core_pct < 50 ~ "Mid-Radius",
+          TRUE ~ "Edge"
+        )
+      ) %>%
+      ungroup()
+    
+    return(list(
+      filtered_data = all_filtered_data,
+      time_ranges = time_ranges
+    ))
+  } else {
+    warning("No valid data remained after filtering")
+    return(NULL)
+  }
+}
+
+# Add transect_id to your dataframe
+df$transect_id <- paste0(df$specimen, "-", df$transect)
+
+# Process your data with the fixed function
+results <- process_icp_data(df, allotos)
+  
+  specimens <- c("oto05", "oto10", "oto12", "oto14", "oto18", "oto19", "oto20",
+                          "oto21", "oto22", "oto23", "oto24", "oto25",
+                          "oto26", "oto27", "oto28", "oto29", "oto30",
+                          "oto31", "oto32", "oto33", "oto34", "oto35",
+                          "oto36", "oto37", "oto38", "oto39", "oto40"
+)
+
+temp <- results$filtered_data %>% filter(specimen == "oto13", transect_quality == "good")
+temp <- temp %>% filter(time < 103)
+
+ggplot(temp, aes(x = time, y = Mn55_ppm, color = transect_id)) + 
+  geom_line()
+
+
+
+# Create transect_id column to match line_name in annotations
+df$transect_id <- paste0(df$specimen, "-", df$transect)
+
+
+allotos <- read.csv("allotos.csv")
+# Process your data with the fixed function
+results <- process_icp_data(df, allotos)  # Note: passing the dataframe directly, not a filename
+
+# Access the filtered data
+filtered_data <- results$filtered_data
+
+# Plot example element profile
+ggplot(filtered_data, aes(x = distance_from_core_pct, y = Sr88_ppm, color = transect_id)) +
+  geom_line() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~otolith_region, scales = "free") +
+  theme_minimal() +
+  labs(title = "Sr88 Concentration by Otolith Region", 
+       x = "Distance from Core (%)", 
+       y = "Sr88 (ppm)")
+```
+
+
 
 # Vegan & CCora 
 ICP-MS and FT-NIRS Data combined
@@ -679,7 +933,7 @@ model_element <- function(data, element) {
   gam_model <- gam(Target ~ s(PC1, k=4) + s(PC2, k=4) + s(PC3, k=4) + s(PC4, k=4) + s(PC5, k=4), data = train_pc)
   
   # PLS Model using mdatools
-  pls_model <- pls(train_data[, spec_cols], train_data[[element]], ncomp = 10, cv = 1)
+  pls_model <- mdatools::pls(train_data[, spec_cols], train_data[[element]], ncomp = 10, cv = 1)
   
   # Evaluate models
   results <- data.frame(Model = character(), R2 = numeric(), RMSE = numeric())
@@ -964,7 +1218,9 @@ create_result_table <- function(data, caption) {
 #### Run Plots
 
 ```{r fig.height=8, fig.width=12, message=FALSE, warning=FALSE, results='asis'}
-elements_to_plot <- c("Ca43", "Sr86_ppm", "Sr87_ppm", "Sr88_ppm", "Ba138_ppm", "Zn66_ppm", "Mg24_ppm", "Mn55_ppm")
+elements_to_plot <- c("Sr86_ppm") 
+                      # "Sr86_ppm", "Sr87_ppm", "Sr88_ppm", "Ba138_ppm", "Zn66_ppm", "Mg24_ppm", "Mn55_ppm")
+)
 
 for (element in elements_to_plot) {
   cat("##", element, "\n\n")

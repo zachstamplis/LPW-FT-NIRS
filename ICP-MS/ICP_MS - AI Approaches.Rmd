@@ -10,6 +10,7 @@ invisible(lapply(packages, library, character.only = TRUE))
 rm(packages, new_packages)
 ```
 
+
 # Data Import
 Read and prepare initial dataframe for otolith elemental analysis from saved RDS file
 
@@ -597,13 +598,625 @@ if(!is.null(otolith_comparisons)) {
 }
 ```
 
+# SHINY - mark lines but better
 
 
+```{r}
 
+library(shiny)
+library(plotly)
+library(magick)
+library(base64enc)
 
+ui <- fluidPage(
+  titlePanel("Otolith Ablation Line Quality Assessment Tool"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("imageFile", "Upload Otolith Image", accept = c('image/png', 'image/jpeg')),
+      
+      hr(),
+      h4("Step 1: Draw Line"),
+      textInput("lineName", "Line Name/ID:", placeholder = "Enter specimen ID or line name"),
+      actionButton("startLine", "Start New Line", class = "btn-primary"),
+      actionButton("clearLine", "Clear Line", class = "btn-danger"),
+      
+      hr(),
+      h4("Step 2: Mark Features"),
+      radioButtons("annotationType", "Select Feature to Mark:",
+                   choices = c("Start of Otolith" = "start",
+                               "Core" = "core",
+                               "End of Otolith" = "end",
+                               "Start of Useful Data" = "data_start",
+                               "End of Useful Data" = "data_end"),
+                   selected = "start"),
+      actionButton("clearAnnotations", "Clear Annotations", class = "btn-warning"),
+      
+      hr(),
+      h4("Step 3: Transect Quality"),
+      selectInput("transectQuality", "Transect Quality:",
+                  choices = c("Good" = "good",
+                              "Marginal" = "marginal",
+                              "Poor (Exclude)" = "poor"),
+                  selected = "good"),
+      textAreaInput("notes", "Notes:", rows = 3, 
+                    placeholder = "Add notes about data quality or reasons for exclusion"),
+      
+      hr(),
+      h4("Line Management"),
+      actionButton("saveLine", "Save Current Line", class = "btn-success"),
+      selectInput("lineSelector", "Select Line:", choices = NULL),
+      actionButton("deleteLine", "Delete Selected Line", class = "btn-danger"),
+      
+      hr(),
+      downloadButton("downloadData", "Download All Data", class = "btn-info"),
+      
+      hr(),
+      verbatimTextOutput("statusText")
+    ),
+    
+    mainPanel(
+      plotOutput("imagePlot", height = "600px", click = "plot_click"),
+      verbatimTextOutput("lineInfo")
+    )
+  )
+)
 
+server <- function(input, output, session) {
+  # Reactive values
+  values <- reactiveValues(
+    # Image data
+    img = NULL,
+    img_width = 0,
+    img_height = 0,
+    
+    # Current line being drawn
+    drawing = FALSE,
+    current_line = list(
+      name = "",
+      start = NULL,
+      end = NULL,
+      annotations = list(),
+      quality = "good",
+      notes = ""
+    ),
+    
+    # Saved lines
+    lines = list(),
+    selected_line_index = 0
+  )
+  
+  # Display the image with annotations
+  output$imagePlot <- renderPlot({
+    req(values$img)
+    
+    # Plot the image
+    plot(values$img, axes = FALSE)
+    
+    # Draw the current line if it exists
+    if (!is.null(values$current_line$start)) {
+      points(values$current_line$start$x, values$current_line$start$y, 
+             col = "red", pch = 16, cex = 2)
+      
+      # If end point exists, draw the line
+      if (!is.null(values$current_line$end)) {
+        # Line style based on quality
+        line_style <- switch(values$current_line$quality,
+                             "good" = 1,    # solid
+                             "marginal" = 2, # dashed
+                             "poor" = 3)     # dotted
+        
+        lines(
+          c(values$current_line$start$x, values$current_line$end$x),
+          c(values$current_line$start$y, values$current_line$end$y),
+          col = "red", lwd = 2, lty = line_style
+        )
+        points(values$current_line$end$x, values$current_line$end$y, 
+               col = "red", pch = 16, cex = 2)
+        
+        # Add line name text near the middle of the line if available
+        if (values$current_line$name != "") {
+          mid_x <- (values$current_line$start$x + values$current_line$end$x) / 2
+          mid_y <- (values$current_line$start$y + values$current_line$end$y) / 2
+          text(mid_x, mid_y, values$current_line$name, col = "red", pos = 3, offset = 0.5, cex = 0.8)
+        }
+        
+        # Draw annotations on the current line
+        for (type in names(values$current_line$annotations)) {
+          point <- values$current_line$annotations[[type]]
+          color <- switch(type,
+                          "start" = "green",
+                          "core" = "purple",
+                          "end" = "orange",
+                          "data_start" = "blue",
+                          "data_end" = "darkred")
+          
+          symbol <- switch(type,
+                           "start" = 15,    # Square
+                           "core" = 18,     # Diamond
+                           "end" = 17,      # Triangle
+                           "data_start" = 23, # Diamond plus
+                           "data_end" = 25)   # Square plus
+          
+          points(point$x, point$y, col = color, pch = symbol, cex = 2)
+          
+          # Add label for the annotation
+          label <- switch(type,
+                          "start" = "Start",
+                          "core" = "Core",
+                          "end" = "End",
+                          "data_start" = "Data Start",
+                          "data_end" = "Data End")
+          text(point$x, point$y, label, col = color, pos = 4, cex = 0.7)
+        }
+        
+        # If data start and end are marked, highlight the useful data section
+        if (!is.null(values$current_line$annotations$data_start) && 
+            !is.null(values$current_line$annotations$data_end)) {
+          
+          # Get the positions on the line
+          start_point <- list(x = values$current_line$start$x, y = values$current_line$start$y)
+          end_point <- list(x = values$current_line$end$x, y = values$current_line$end$y)
+          data_start <- values$current_line$annotations$data_start
+          data_end <- values$current_line$annotations$data_end
+          
+          # Calculate position parameters
+          t_start <- calculate_position_on_line(data_start, start_point, end_point)
+          t_end <- calculate_position_on_line(data_end, start_point, end_point)
+          
+          # Draw a thicker line segment for the useful data
+          lines(
+            c(start_point$x + t_start * (end_point$x - start_point$x), 
+              start_point$x + t_end * (end_point$x - start_point$x)),
+            c(start_point$y + t_start * (end_point$y - start_point$y), 
+              start_point$y + t_end * (end_point$y - start_point$y)),
+            col = "cyan", lwd = 4
+          )
+        }
+      }
+    }
+    
+    # Draw saved lines
+    for (i in seq_along(values$lines)) {
+      line <- values$lines[[i]]
+      
+      # Line color - highlight selected line
+      line_color <- ifelse(i == values$selected_line_index, "blue", "gray")
+      
+      # Line style based on quality
+      line_style <- switch(line$quality,
+                           "good" = 1,    # solid
+                           "marginal" = 2, # dashed
+                           "poor" = 3)     # dotted
+      
+      # Draw line
+      lines(
+        c(line$start$x, line$end$x),
+        c(line$start$y, line$end$y),
+        col = line_color, lwd = 2, lty = line_style
+      )
+      
+      # Draw endpoints
+      points(line$start$x, line$start$y, col = line_color, pch = 16, cex = 1.5)
+      points(line$end$x, line$end$y, col = line_color, pch = 16, cex = 1.5)
+      
+      # Add line name text near the middle of the line if available
+      if (!is.null(line$name) && line$name != "") {
+        mid_x <- (line$start$x + line$end$x) / 2
+        mid_y <- (line$start$y + line$end$y) / 2
+        text(mid_x, mid_y, line$name, col = line_color, pos = 3, offset = 0.5, cex = 0.8)
+      }
+      
+      # Draw annotations
+      for (type in names(line$annotations)) {
+        point <- line$annotations[[type]]
+        color <- switch(type,
+                        "start" = "green",
+                        "core" = "purple",
+                        "end" = "orange",
+                        "data_start" = "blue",
+                        "data_end" = "darkred")
+        
+        symbol <- switch(type,
+                         "start" = 15,    # Square
+                         "core" = 18,     # Diamond
+                         "end" = 17,      # Triangle
+                         "data_start" = 23, # Diamond plus
+                         "data_end" = 25)   # Square plus
+        
+        points(point$x, point$y, col = color, pch = symbol, cex = 1.5)
+      }
+      
+      # If data start and end are marked, highlight the useful data section
+      if (!is.null(line$annotations$data_start) && 
+          !is.null(line$annotations$data_end)) {
+        
+        # Get the positions on the line
+        start_point <- list(x = line$start$x, y = line$start$y)
+        end_point <- list(x = line$end$x, y = line$end$y)
+        data_start <- line$annotations$data_start
+        data_end <- line$annotations$data_end
+        
+        # Calculate position parameters
+        t_start <- calculate_position_on_line(data_start, start_point, end_point)
+        t_end <- calculate_position_on_line(data_end, start_point, end_point)
+        
+        # Draw a thicker line segment for the useful data
+        lines(
+          c(start_point$x + t_start * (end_point$x - start_point$x), 
+            start_point$x + t_end * (end_point$x - start_point$x)),
+          c(start_point$y + t_start * (end_point$y - start_point$y), 
+            start_point$y + t_end * (end_point$y - start_point$y)),
+          col = "cyan", lwd = 3
+        )
+      }
+    }
+  })
+  
+  # Function to calculate position along line (0 to 1)
+  calculate_position_on_line <- function(point, start, end) {
+    # Calculate vectors
+    line_vector <- c(end$x - start$x, end$y - start$y)
+    point_vector <- c(point$x - start$x, point$y - start$y)
+    
+    # Calculate projection
+    projection <- sum(point_vector * line_vector) / sum(line_vector^2)
+    
+    # Clamp to [0, 1]
+    return(max(0, min(1, projection)))
+  }
+  
+  # Handle image upload
+  observeEvent(input$imageFile, {
+    # Read the image
+    values$img <- image_read(input$imageFile$datapath)
+    info <- image_info(values$img)
+    values$img_width <- info$width
+    values$img_height <- info$height
+    
+    # Reset current line
+    values$current_line <- list(
+      name = "",
+      start = NULL,
+      end = NULL,
+      annotations = list(),
+      quality = "good",
+      notes = ""
+    )
+    values$drawing <- FALSE
+  })
+  
+  # Start a new line
+  observeEvent(input$startLine, {
+    values$current_line <- list(
+      name = input$lineName,
+      start = NULL,
+      end = NULL,
+      annotations = list(),
+      quality = input$transectQuality,
+      notes = input$notes
+    )
+    values$drawing <- TRUE
+    output$statusText <- renderText("Click on the image to set the START point of the line")
+  })
+  
+  # Clear current line
+  observeEvent(input$clearLine, {
+    values$current_line <- list(
+      name = input$lineName,
+      start = NULL,
+      end = NULL,
+      annotations = list(),
+      quality = input$transectQuality,
+      notes = input$notes
+    )
+    values$drawing <- FALSE
+    output$statusText <- renderText("Line cleared")
+  })
+  
+  # Clear annotations on current line
+  observeEvent(input$clearAnnotations, {
+    values$current_line$annotations <- list()
+    output$statusText <- renderText("Annotations cleared")
+  })
+  
+  # Update quality and notes when changed
+  observeEvent(input$transectQuality, {
+    values$current_line$quality <- input$transectQuality
+  })
+  
+  observeEvent(input$notes, {
+    values$current_line$notes <- input$notes
+  })
+  
+  # Save current line
+  observeEvent(input$saveLine, {
+    if (!is.null(values$current_line$start) && !is.null(values$current_line$end)) {
+      # Make sure the line has a name - use default if empty
+      if (is.null(values$current_line$name) || values$current_line$name == "") {
+        values$current_line$name <- paste("Line", length(values$lines) + 1)
+      }
+      
+      # Add the current line to saved lines
+      values$lines[[length(values$lines) + 1]] <- values$current_line
+      
+      # Update line selector with names
+      updateLineSelector()
+      
+      # Set as selected line
+      values$selected_line_index <- length(values$lines)
+      
+      # Reset current line but keep the name for convenience
+      current_name <- values$current_line$name
+      values$current_line <- list(
+        name = current_name,
+        start = NULL,
+        end = NULL,
+        annotations = list(),
+        quality = input$transectQuality,
+        notes = input$notes
+      )
+      values$drawing <- FALSE
+      
+      output$statusText <- renderText(paste("Line saved as", current_name))
+    } else {
+      output$statusText <- renderText("Cannot save: Line is incomplete")
+    }
+  })
+  
+  # Update the line selector dropdown
+  updateLineSelector <- function() {
+    line_names <- sapply(values$lines, function(line) {
+      if (!is.null(line$name) && line$name != "") {
+        return(line$name)
+      } else {
+        return(paste("Unnamed Line", which(values$lines == line)))
+      }
+    })
+    
+    updateSelectInput(session, "lineSelector", 
+                      choices = line_names,
+                      selected = if (length(line_names) > 0) line_names[length(line_names)] else NULL)
+  }
+  
+  # Handle line selection
+  observeEvent(input$lineSelector, {
+    if (!is.null(input$lineSelector) && input$lineSelector != "" && length(values$lines) > 0) {
+      # Find the line with this name
+      for (i in seq_along(values$lines)) {
+        if (values$lines[[i]]$name == input$lineSelector) {
+          values$selected_line_index <- i
+          
+          # Load the selected line as current line
+          values$current_line <- values$lines[[i]]
+          values$drawing <- FALSE
+          
+          # Update the UI controls
+          updateTextInput(session, "lineName", value = values$current_line$name)
+          updateSelectInput(session, "transectQuality", selected = values$current_line$quality)
+          updateTextAreaInput(session, "notes", value = values$current_line$notes)
+          
+          output$statusText <- renderText(paste("Loaded", input$lineSelector))
+          break
+        }
+      }
+    }
+  })
+  
+  # Delete selected line
+  observeEvent(input$deleteLine, {
+    if (values$selected_line_index > 0 && values$selected_line_index <= length(values$lines)) {
+      # Get the name before deleting
+      line_name <- values$lines[[values$selected_line_index]]$name
+      
+      # Remove the line
+      values$lines <- values$lines[-values$selected_line_index]
+      
+      # Update selected index
+      if (length(values$lines) == 0) {
+        values$selected_line_index <- 0
+      } else if (values$selected_line_index > length(values$lines)) {
+        values$selected_line_index <- length(values$lines)
+      }
+      
+      # Update the line selector
+      updateLineSelector()
+      
+      # Clear current line if it was the deleted one
+      values$current_line <- list(
+        name = input$lineName,
+        start = NULL,
+        end = NULL,
+        annotations = list(),
+        quality = input$transectQuality,
+        notes = input$notes
+      )
+      values$drawing <- FALSE
+      
+      output$statusText <- renderText(paste("Deleted", line_name))
+    }
+  })
+  
+  # Handle clicks on the image
+  observeEvent(input$plot_click, {
+    click <- input$plot_click
+    
+    # If drawing a new line
+    if (values$drawing) {
+      if (is.null(values$current_line$start)) {
+        # Set start point
+        values$current_line$start <- list(x = click$x, y = click$y)
+        output$statusText <- renderText("Click on the image to set the END point of the line")
+      } else if (is.null(values$current_line$end)) {
+        # Set end point
+        values$current_line$end <- list(x = click$x, y = click$y)
+        values$drawing <- FALSE
+        output$statusText <- renderText("Line complete. Now select annotation type and click on line to add markers.")
+      }
+    } 
+    # If line exists and we're adding annotations
+    else if (!is.null(values$current_line$start) && !is.null(values$current_line$end)) {
+      # Find nearest point on the line
+      start_x <- values$current_line$start$x
+      start_y <- values$current_line$start$y
+      end_x <- values$current_line$end$x
+      end_y <- values$current_line$end$y
+      
+      # Calculate parameter t for closest point on the line
+      numerator <- (click$x - start_x) * (end_x - start_x) + 
+        (click$y - start_y) * (end_y - start_y)
+      denominator <- (end_x - start_x)^2 + (end_y - start_y)^2
+      t <- numerator / denominator
+      
+      # Clamp t to [0, 1] to keep point on the line segment
+      t <- max(0, min(1, t))
+      
+      # Calculate the point on the line
+      point_x <- start_x + t * (end_x - start_x)
+      point_y <- start_y + t * (end_y - start_y)
+      
+      # Add the annotation
+      type <- input$annotationType
+      values$current_line$annotations[[type]] <- list(x = point_x, y = point_y)
+      
+      output$statusText <- renderText(paste("Added", 
+                                            switch(type,
+                                                   "start" = "Start of Otolith",
+                                                   "core" = "Core",
+                                                   "end" = "End of Otolith",
+                                                   "data_start" = "Start of Useful Data",
+                                                   "data_end" = "End of Useful Data"), 
+                                            "marker"))
+    }
+  })
+  
+  # Update line name when text input changes
+  observeEvent(input$lineName, {
+    values$current_line$name <- input$lineName
+  })
+  
+  # Display line information
+  output$lineInfo <- renderPrint({
+    if (!is.null(values$current_line$start)) {
+      cat("Current Line:", if(values$current_line$name != "") values$current_line$name else "Unnamed", "\n")
+      cat("Quality:", values$current_line$quality, "\n")
+      if (values$current_line$notes != "") {
+        cat("Notes:", values$current_line$notes, "\n")
+      }
+      
+      # Start point
+      cat("  Start: (", round(values$current_line$start$x, 1), ", ", 
+          round(values$current_line$start$y, 1), ")\n", sep="")
+      
+      # End point
+      if (!is.null(values$current_line$end)) {
+        cat("  End: (", round(values$current_line$end$x, 1), ", ", 
+            round(values$current_line$end$y, 1), ")\n", sep="")
+      }
+      
+      # Annotations
+      if (length(values$current_line$annotations) > 0) {
+        cat("  Annotations:\n")
+        for (type in names(values$current_line$annotations)) {
+          point <- values$current_line$annotations[[type]]
+          label <- switch(type,
+                          "start" = "Start of Otolith",
+                          "core" = "Core",
+                          "end" = "End of Otolith",
+                          "data_start" = "Start of Useful Data",
+                          "data_end" = "End of Useful Data")
+          cat("    ", label, ": (", round(point$x, 1), ", ", 
+              round(point$y, 1), ")\n", sep="")
+        }
+      }
+    } else {
+      cat("No current line\n")
+    }
+    
+    # Information about saved lines
+    if (length(values$lines) > 0) {
+      cat("\nSaved Lines:\n")
+      for (i in seq_along(values$lines)) {
+        line <- values$lines[[i]]
+        cat("  ", if(!is.null(line$name) && line$name != "") line$name else paste("Line", i), 
+            " (", line$quality, "):\n", sep="")
+        
+        if (line$notes != "") {
+          cat("    Notes: ", line$notes, "\n", sep="")
+        }
+        
+        cat("    Start: (", round(line$start$x, 1), ", ", 
+            round(line$start$y, 1), ")\n", sep="")
+        cat("    End: (", round(line$end$x, 1), ", ", 
+            round(line$end$y, 1), ")\n", sep="")
+        
+        if (length(line$annotations) > 0) {
+          cat("    Annotations:\n")
+          for (type in names(line$annotations)) {
+            point <- line$annotations[[type]]
+            label <- switch(type,
+                            "start" = "Start of Otolith",
+                            "core" = "Core",
+                            "end" = "End of Otolith",
+                            "data_start" = "Start of Useful Data",
+                            "data_end" = "End of Useful Data")
+            cat("      ", label, ": (", round(point$x, 1), ", ", 
+                round(point$y, 1), ")\n", sep="")
+          }
+        }
+      }
+    }
+  })
+  
+  # Initialize status text
+  output$statusText <- renderText("Upload an image to begin")
+  
+  # Download data
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      paste("otolith-lines-", Sys.Date(), ".csv", sep="")
+    },
+    content = function(file) {
+      # Create a data frame with all line information
+      result <- data.frame()
+      
+      for (i in seq_along(values$lines)) {
+        line <- values$lines[[i]]
+        
+        # Basic line info
+        line_data <- data.frame(
+          line_number = i,
+          line_name = if(!is.null(line$name)) line$name else paste("Line", i),
+          quality = line$quality,
+          notes = line$notes,
+          start_x = line$start$x,
+          start_y = line$start$y,
+          end_x = line$end$x,
+          end_y = line$end$y
+        )
+        
+        # Add annotation info
+        for (type in c("start", "core", "end", "data_start", "data_end")) {
+          if (!is.null(line$annotations[[type]])) {
+            line_data[[paste0(type, "_annotation_x")]] <- line$annotations[[type]]$x
+            line_data[[paste0(type, "_annotation_y")]] <- line$annotations[[type]]$y
+          } else {
+            line_data[[paste0(type, "_annotation_x")]] <- NA
+            line_data[[paste0(type, "_annotation_y")]] <- NA
+          }
+        }
+        
+        result <- rbind(result, line_data)
+      }
+      
+      write.csv(result, file, row.names = FALSE)
+    }
+  )
+}
 
+shinyApp(ui, server)
 
+```
 
 
 # Old Code
