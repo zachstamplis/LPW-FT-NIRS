@@ -18,8 +18,8 @@ rm(installed_packages, packages)
 # Ensure the path is correct for your environment
 ibm <- readRDS("RDS_dataframes/IBM_proc_filter.RDS") %>%
   select(-c(haul, date_collected, read_age, test_age, final_age, scan_name, timestamp, file_name, session_title, file_path))
-ages <- read_xlsx("metadata/ibm_ages_07302025.xlsx") %>% 
-  select(-c(avg_age, hatch_est, length, area, percent_affected, structure_weight)) %>%
+ages <- read_xlsx("metadata/ibm_ages_10032025.xlsx") %>% 
+  select(-c(avg_age, hatch_est)) %>%
   mutate(
     # Calculate the mean of age1, age2, and age3 for each row
     avg_age = rowMeans(select(., age1, age2, age3), na.rm = TRUE),
@@ -27,7 +27,22 @@ ages <- read_xlsx("metadata/ibm_ages_07302025.xlsx") %>%
     hatch_est = julian_date - avg_age
   ) %>% 
   # remove rows with NA for age1
-  filter(!is.na(age1))
+  filter(!is.na(age1)) %>%
+  # Group by row to perform row-wise operations
+  rowwise() %>%
+  # Calculate the standard deviation of the age estimates for each specimen
+  mutate(
+    age_sd = sd(c(age1, age2, age3), na.rm = TRUE)
+  ) %>%
+  # Ungroup to return to normal dataframe operations
+  ungroup() %>%
+  # Calculate the coefficient of variation (CV) in percent
+  mutate(
+    age_cv_percent = (age_sd / avg_age) * 100
+  ) %>%
+  # Filter to keep rows with a CV of 10% or less, or where CV is not applicable
+  filter(age_cv_percent <= 10 | is.na(age_cv_percent)) %>% 
+  select(-age_sd, -age_cv_percent)
 
 df <- left_join(
   ages, 
@@ -41,7 +56,15 @@ df <- df %>%
 df <- df[complete.cases(df$avg_age), ]
 rm(ages, ibm)
 
+# IF YOU WANT TO REMOVE >7500 WAVENUMBER USE BELOW ******#$#)($#)($@*#)$(@*#$)
+# Convert names to numeric, NAs are created for non-numeric names
+numeric_names <- suppressWarnings(as.numeric(names(df)))
+# Keep columns that are NOT numbers OR are numbers <= 7500
+df <- df[, is.na(numeric_names) | numeric_names <= 7500] 
+
+
 # Dredge to find top 5 models ============================================================
+names(df)
 pca_temp <- mdatools::pca(df[, 30:ncol(df)])
 pc_df <- data.frame(PC1 = rep(0, nrow(df)))
 for (i in 1:10) {
@@ -109,7 +132,7 @@ my_full_grid <- expand.grid(
   min_child_weight = c(1, 2, 4, 6, 8, 10, 15, 20, 30), 
   colsample_bytree = c(0.2, 0.3, 0.4, 0.6, 0.8),
   gamma = c(0, 0.1, 1, 5), 
-  subsample = c(0.2, 0.4, 0.6, 0.8, 1)
+  subsample = c(0.4, 0.6, 0.8, 1)
 )
 
 # randomly select 1000 rows from the full grid
@@ -136,6 +159,8 @@ xgb_tuned_model <- train(
 ) 
 Sys.time() # show end time - 
 stopCluster(cl) # stop parallel backend
+
+# with >7500 filtered, only takes 3 minutes
 
 ((best_params_xgb <- xgb_tuned_model$bestTune)) # store best tuning params and print
 
@@ -252,7 +277,7 @@ run_pls_models <- function(cal, test) {
     calibrate <- cal[[i]]; testing <- test[[i]]
     fold_results <- data.frame(Fold = i, Model = c("PLS", "PLS - VIP"), R2 = numeric(2), RMSE = numeric(2), RPD = numeric(2), Bias = numeric(2), PercentRMSE = numeric(2), Components = numeric(2))
     fold_preds <- list(specimen_number = testing$specimen, actual = testing$avg_age, pls_pred = numeric(length(testing$avg_age)), vip_pred = numeric(length(testing$avg_age)))
-    mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"], scale = F, center = T, x.test = testing[, 40:ncol(testing)], y.test = testing[, "avg_age"]); ncomp <- mod$ncomp.selected
+    mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"], scale = F, center = T, cv = 1, x.test = testing[, 40:ncol(testing)], y.test = testing[, "avg_age"]); ncomp <- mod$ncomp.selected
     wavenumbers <- as.numeric(colnames(calibrate[, 40:ncol(calibrate)])); vip_scores <- vipscores(mod)
     importance_df <- data.frame(fold = i, method = "PLS-VIP", wavenumber = wavenumbers, importance = vip_scores)
     all_importance_fold[[i]] <- importance_df
@@ -260,7 +285,7 @@ run_pls_models <- function(cal, test) {
     fold_results$PercentRMSE[1] <- mod$testres$rmse[[ncomp]] / max(testing$avg_age) * 100
     fold_results$Components[1] <- ncomp; fold_preds$pls_pred <- mod$testres$y.pred[, ncomp, ]
     vip <- as.data.frame(vipscores(mod))
-    mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"], scale = F, center = T, x.test = testing[, 40:ncol(testing)], y.test = testing[, "avg_age"], exclcols = vip$V1 < 0.5); ncomp <- mod$ncomp.selected
+    mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"], scale = F, center = T, cv = 1, x.test = testing[, 40:ncol(testing)], y.test = testing[, "avg_age"], exclcols = vip$V1 < 0.5); ncomp <- mod$ncomp.selected
     fold_results$R2[2] <- mod$testres$r2[[ncomp]]; fold_results$RMSE[2] <- mod$testres$rmse[[ncomp]]; fold_results$RPD[2] <- mod$testres$rpd[[ncomp]]; fold_results$Bias[2] <- mod$testres$bias[[ncomp]]
     fold_results$PercentRMSE[2] <- mod$testres$rmse[[ncomp]] / max(testing$avg_age) * 100
     fold_results$Components[2] <- ncomp; fold_preds$vip_pred <- mod$testres$y.pred[, ncomp, ]
@@ -469,8 +494,12 @@ with_progress({
 
 Sys.time()
 plan(sequential) # Shut down parallel workers
+# 50 minutes to run as of 10/03/2025;
+# ~19 mins for <7500 waves only, 10/03/2025
 # 15 minutes vs 1:10 or so non-parallel...!!!!!!
 
+
+# 
 
 # C. Combine results from the parallel run
 cat("Aggregating results from parallel runs...\n")
@@ -587,7 +616,7 @@ with_progress({
 
 Sys.time()
 plan(sequential) # Shut down parallel workers
-
+# very fast in parallel, only 24 seconds as of 10/03/2025
 
 ## 3. Combine Results and Post-Process
 cat("Aggregating results from simple models...\n")
@@ -634,6 +663,13 @@ rownames(simple_predictions_df) <- NULL
 
 # Combine with complex model predictions
 all_predictions_final <- rbind(final_predictions, simple_predictions_df)
+
+
+# IF FILTERED_ RUN THIS
+saveRDS(all_results_means_final, paste0("RDS_dataframes/IBM_filt_all_results_means_parallel", Sys.Date(), ".RDS"))
+saveRDS(all_predictions_final, paste0("RDS_dataframes/IBM_filt_all_predictions_parallel", Sys.Date(), ".RDS"))
+saveRDS(final_importance_data, paste0("RDS_dataframes/IBM_filt_final_importance_data_parallel", Sys.Date(), ".RDS"))
+
 
 # Save final objects
 saveRDS(all_results_means_final, paste0("RDS_dataframes/IBM_all_results_means_parallel", Sys.Date(), ".RDS"))

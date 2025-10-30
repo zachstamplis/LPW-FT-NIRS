@@ -2,8 +2,7 @@
 # 1. SETUP: PACKAGES, DATA, AND MODEL TERMS
 # ================================================================================== #
 
-# Packages ####
-# Added future, future.apply, and progressr for parallel processing
+# Packages #####################################################################
 packages <- c("caret", "doParallel", "dplyr", "devtools", "ggplot2", "mdatools", 
               "mgcv", "MuMIn", "purrr", "ranger", "stringr", "tidyr", "viridis", 
               "xgboost", "future", "future.apply", "progressr")
@@ -14,12 +13,30 @@ if (any(installed_packages == FALSE)) {
 invisible(lapply(packages, library, character.only = TRUE))
 rm(installed_packages, packages)
 
-# Load dataframe ========================================================================
-# Ensure the path is correct for your environment
+################################################################################
+
+# Load dataframe ===============================================================
+
+################################################################################
+
 df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 df <- df[complete.cases(df$read_age), ]
 
-# Dredge to find top 5 models ============================================================
+
+
+
+# IF YOU WANT TO REMOVE >7500 WAVENUMBER USE BELOW ******#$#)($#)($@*#)$(@*#$)
+# Convert names to numeric, NAs are created for non-numeric names
+# numeric_names <- suppressWarnings(as.numeric(names(df)))
+# Keep columns that are NOT numbers OR are numbers <= 7500
+# df <- df[, is.na(numeric_names) | numeric_names <= 7500] 
+
+################################################################################
+
+# Dredge to find top 5 models ==================================================
+
+################################################################################
+
 pca_temp <- mdatools::pca(df[, 21:ncol(df)])
 pc_df <- data.frame(PC1 = rep(0, nrow(df)))
 for (i in 1:10) {
@@ -44,8 +61,12 @@ for(i in 1:10){
 }
 rm(global_gam, global_lm, top10_gam, top10_lm, pc_df, pca_temp, dredge_gam, dredge_lm, i)
 
+################################################################################
 
 # Functions for splits and metrics =================================================
+
+################################################################################
+
 generate_multiple_splits <- function(data = df, n_splits) {
   all_splits <- list()
   for (split_id in 1:n_splits) {
@@ -64,45 +85,127 @@ calculate_bias <- function(observed, predicted) {
   return(bias)
 }
 
+################################################################################
 
-# Tuning (Your original tuning code) ==============================================
-# NOTE: This section remains unchanged and runs serially before the main simulation.
-# If you have already run this and have the `best_params_` objects, you can skip this part.
+# Tuning  ======================================================================
 
-## XGB Tuning ####
-# cl <- makePSOCKcluster(parallel::detectCores() - 1)
-# registerDoParallel(cl)
-# my_full_grid <- expand.grid(...)
-# set.seed(6)
-# my_random_grid <- my_full_grid[sample(1:nrow(my_full_grid), 1000), ]
-# train_control <- trainControl(...)
-# xgb_tuned_model <- train(...)
-# stopCluster(cl)
-# (best_params_xgb <- xgb_tuned_model$bestTune)
-# Using your saved parameters to ensure reproducibility
+################################################################################
+
+# XGB Tuning ####
+cl <- makePSOCKcluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+# 2. Define  full hyperparameter grid
+my_full_grid <- expand.grid(
+  nrounds = c(100, 300, 500, 800, 1600, 2000),
+  eta = c(0.01, 0.05, 0.1, 0.2, 0.3),
+  max_depth = c(1, 2, 3, 4, 6, 8),
+  min_child_weight = c(1, 2, 4, 6, 8, 10, 15, 20, 30),
+  colsample_bytree = c(0.2, 0.3, 0.4, 0.6, 0.8),
+  gamma = c(0, 0.1, 1, 5),
+  subsample = c(0.2, 0.4, 0.6, 0.8, 1)
+)
+set.seed(6)
+my_random_grid <- my_full_grid[sample(1:nrow(my_full_grid), 1000), ]
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 1,
+  search = "grid",
+  allowParallel = TRUE
+)
+Sys.time() # show start time
+xgb_tuned_model <- train(
+  x = as.matrix(df[, 21:ncol(df)]),
+  y = df$read_age,
+  method = "xgbTree",
+  trControl = train_control,
+  tuneGrid = my_random_grid,
+  verbose = FALSE # Suppress output during tuning
+)
+Sys.time()
+stopCluster(cl)
+# 10/03/2025 
+# filtered, 100 / 162,000. ~ 1 minute
+# nrounds max_depth  eta gamma colsample_bytree min_child_weight subsample
+# 32    2000         3 0.05     1              0.2                1       0.2
+
+# filtered, 1000 / 162,000, 8 minutes
+# nrounds max_depth eta gamma colsample_bytree min_child_weight subsample
+# 741     100         6 0.2     0              0.6                6       0.8
+
+# 10/03/2025 
+# all waves, 100 / 162,000. ~  minutes
+# nrounds max_depth  eta gamma colsample_bytree min_child_weight subsample
+# 1     500         1 0.01   0.1              0.6                8       0.6
+# all waves, 1000 / 162,000. ~  17 minutes
+# nrounds max_depth  eta gamma colsample_bytree min_child_weight subsample
+# 257     300         2 0.05     5              0.4                8         1
+(best_params_xgb <- xgb_tuned_model$bestTune)
+
+################################################################################
+# previous parameters # 
 best_params_xgb <- data.frame(nrounds = 300, max_depth = 2, eta = 0.05, gamma = 5, colsample_bytree = 0.4, min_child_weight = 8, subsample = 1)
+################################################################################
 
+
+
+################################################################################
 
 ## Random Forest Tuning ####
-# cl <- makePSOCKcluster(parallel::detectCores() - 1)
-# registerDoParallel(cl)
-# tuning_grid_rf <- expand.grid(...)
-# train_control <- trainControl(...)
-# rf_tuned_model <- train(...)
-# stopCluster(cl)
-# (best_params_rf <- rf_tuned_model$bestTune)
-# Using saved best parameters from your code
+
+################################################################################
+
+cl <- makePSOCKcluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+tuning_grid_rf <- expand.grid(
+  mtry = c(floor(sqrt(ncol(df[, 21:ncol(df)])) * 0.1),
+           floor(sqrt(ncol(df[, 21:ncol(df)])) * 0.2),
+           floor(ncol(df[, 21:ncol(df)]) / 3),
+           floor(ncol(df[, 21:ncol(df)]) / 2)),
+  min.node.size = c(1, 3, 5, 15, 25, 35),
+  splitrule = "variance" # Required for regression with ranger in caret
+)
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 10,       # 10 folds
+  repeats = 1,
+  search = "grid",
+  allowParallel = TRUE
+)
+Sys.time()
+rf_tuned_model <- train(
+  x = df[, 21:ncol(df)],
+  y = df$read_age,
+  method = "ranger",        # Use the ranger package for Random Forest
+  trControl = train_control,
+  tuneGrid = tuning_grid_rf,
+  importance = 'permutation', # Calculate variable importance on the final model
+  num.trees = 1000
+)
+Sys.time()
+stopCluster(cl)
+(best_params_rf <- rf_tuned_model$bestTune)
+
+
+
+################################################################################
+#   mtry splitrule min.node.size
+# 23  218  variance            25
+
+# previous parameters # 
 best_params_rf <- data.frame(
-  mtry = 466, 
-  min.node.size = 15, 
+  mtry = 466,
+  min.node.size = 15,
   splitrule = "variance"
 )
+################################################################################
 
 
-# Your original model functions =====================================================
-# run_lm_models, run_gam_models, etc. These are used inside the parallel function.
-# ... (All your run_..._models and combine/extract functions are assumed to be here) ...
-# ... I am including them below for a fully self-contained script ...
+################################################################################
+
+# model functions ==============================================================
+
+################################################################################
 
 run_lm_models <- function(cal, test, terms_lm) {
   splits_results_lm <- data.frame()
@@ -127,6 +230,7 @@ run_lm_models <- function(cal, test, terms_lm) {
   splits_results_lm$ModelType <- "LM"
   return(list(results = splits_results_lm, predictions = all_predictions))
 }
+################################################################################
 run_gam_models <- function(cal, test, terms_gam) {
   splits_results_gam <- data.frame()
   all_predictions <- list()
@@ -153,6 +257,7 @@ run_gam_models <- function(cal, test, terms_gam) {
   splits_results_gam <- merge(splits_results_gam, components_map, by = "Model", all.x = TRUE)
   return(list(results = splits_results_gam, predictions = all_predictions))
 }
+################################################################################
 run_pls_models <- function(cal, test) {
   splits_results_pls <- data.frame()
   all_predictions <- list(); all_importance_fold <- list()
@@ -160,7 +265,7 @@ run_pls_models <- function(cal, test) {
     calibrate <- cal[[i]]; testing <- test[[i]]
     fold_results <- data.frame(Fold = i, Model = c("PLS", "PLS - VIP"), R2 = numeric(2), RMSE = numeric(2), RPD = numeric(2), Bias = numeric(2), PercentRMSE = numeric(2), Components = numeric(2))
     fold_preds <- list(specimen_number = testing$specimen, actual = testing$read_age, pls_pred = numeric(length(testing$read_age)), vip_pred = numeric(length(testing$read_age)))
-    mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"], scale = F, center = T, x.test = testing[, 31:ncol(testing)], y.test = testing[, "read_age"]); ncomp <- mod$ncomp.selected
+    mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"], cv = 1, scale = F, center = T, x.test = testing[, 31:ncol(testing)], y.test = testing[, "read_age"]); ncomp <- mod$ncomp.selected
     wavenumbers <- as.numeric(colnames(calibrate[, 31:ncol(calibrate)])); vip_scores <- vipscores(mod)
     importance_df <- data.frame(fold = i, method = "PLS-VIP", wavenumber = wavenumbers, importance = vip_scores)
     all_importance_fold[[i]] <- importance_df
@@ -168,7 +273,7 @@ run_pls_models <- function(cal, test) {
     fold_results$PercentRMSE[1] <- mod$testres$rmse[[ncomp]] / max(testing$read_age) * 100
     fold_results$Components[1] <- ncomp; fold_preds$pls_pred <- mod$testres$y.pred[, ncomp, ]
     vip <- as.data.frame(vipscores(mod))
-    mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"], scale = F, center = T, x.test = testing[, 31:ncol(testing)], y.test = testing[, "read_age"], exclcols = vip$V1 < 0.5); ncomp <- mod$ncomp.selected
+    mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"], scale = F, center = T, cv = 1, x.test = testing[, 31:ncol(testing)], y.test = testing[, "read_age"], exclcols = vip$V1 < 0.5); ncomp <- mod$ncomp.selected
     fold_results$R2[2] <- mod$testres$r2[[ncomp]]; fold_results$RMSE[2] <- mod$testres$rmse[[ncomp]]; fold_results$RPD[2] <- mod$testres$rpd[[ncomp]]; fold_results$Bias[2] <- mod$testres$bias[[ncomp]]
     fold_results$PercentRMSE[2] <- mod$testres$rmse[[ncomp]] / max(testing$read_age) * 100
     fold_results$Components[2] <- ncomp; fold_preds$vip_pred <- mod$testres$y.pred[, ncomp, ]
@@ -179,6 +284,7 @@ run_pls_models <- function(cal, test) {
   final_importance_df <- dplyr::bind_rows(all_importance_fold)
   return(list(results = splits_results_pls, predictions = all_predictions, importance = final_importance_df))
 }
+################################################################################
 run_xgb_models <- function(cal, test, best_params_xgb) {
   xgb_results_df <- data.frame(); all_predictions <- list(); all_importance_fold <- list()
   for (i in 1:10) {
@@ -186,7 +292,7 @@ run_xgb_models <- function(cal, test, best_params_xgb) {
     x_train <- as.matrix(calibrate[, 31:ncol(calibrate)]); x_test <- as.matrix(testing[, 31:ncol(calibrate)])
     y_train <- calibrate[, "read_age"]; y_test <- testing[, "read_age"]
     dtrain <- xgb.DMatrix(data = x_train, label = y_train); dtest <- xgb.DMatrix(data = x_test, label = y_test)
-    params <- list(objective = "reg:squarederror", booster = "gbtree", eta = 0.1, max_depth = best_params_xgb$max_depth, min_child_weight = best_params_xgb$min_child_weight, subsample = best_params_xgb$subsample, gamma = best_params_xgb$gamma, colsample_bytree = best_params_xgb$colsample_bytree, nthread = parallel::detectCores() - 1)
+    params <- list(objective = "reg:squarederror", booster = "gbtree", eta = best_params_xgb$eta, max_depth = best_params_xgb$max_depth, min_child_weight = best_params_xgb$min_child_weight, subsample = best_params_xgb$subsample, gamma = best_params_xgb$gamma, colsample_bytree = best_params_xgb$colsample_bytree, nthread = parallel::detectCores() - 1)
     xgb_model <- xgb.train(params = params, data = dtrain, nrounds = 1000, watchlist = list(train = dtrain, test = dtest), early_stopping_rounds = 20, verbose = 0)
     wavenumbers_char <- colnames(x_train); importance_matrix <- xgb.importance(model = xgb_model)
     importance_df <- data.frame(Feature = wavenumbers_char) %>% left_join(importance_matrix, by = "Feature") %>% mutate(fold = i, method = "XGBoost", wavenumber = as.numeric(Feature), importance = ifelse(is.na(Gain), 0, Gain)) %>% select(fold, method, wavenumber, importance)
@@ -202,6 +308,7 @@ run_xgb_models <- function(cal, test, best_params_xgb) {
   xgb_results_df$ModelType <- "XGB"
   return(list(results = xgb_results_df, predictions = all_predictions, importance = final_importance_df))
 }
+################################################################################
 run_rf_models <- function(cal, test, best_params_rf) {
   splits_results_rf <- data.frame(); all_predictions <- list(); all_importance_fold <- list()
   for (i in 1:10) {
@@ -227,6 +334,13 @@ run_rf_models <- function(cal, test, best_params_rf) {
   splits_results_rf$ModelType <- "RF"
   return(list(results = splits_results_rf, predictions = all_predictions, importance = final_importance_df))
 }
+
+################################################################################
+
+# results and predictions
+
+################################################################################
+
 combine_all_results <- function(model_results_list) {
   all_dfs <- lapply(model_results_list, function(x) { if ("results" %in% names(x)) x$results else x })
   all_cols <- unique(unlist(lapply(all_dfs, colnames)))
@@ -237,6 +351,7 @@ combine_all_results <- function(model_results_list) {
   })
   do.call(rbind, standardized_dfs)
 }
+################################################################################
 extract_all_predictions <- function(model_results, split_set) {
   all_preds <- list()
   for (model_type in names(model_results)) {
@@ -267,7 +382,7 @@ extract_all_predictions <- function(model_results, split_set) {
 # 2. PARALLEL EXECUTION OF COMPLEX MODELS
 # ================================================================================== #
 
-# A. Define the function to process a single split (body of your original for-loop)
+# A. Define the function to process a single split 
 process_single_split <- function(split_set, all_splits_data, df_data, p) {
   
   # Signal a progress update
@@ -305,7 +420,6 @@ process_single_split <- function(split_set, all_splits_data, df_data, p) {
   }
   
   # Run models and store results
-  # Note: `terms_lm` and other objects are found in the global environment by the future workers
   model_results <- list(
     lm = run_lm_models(cal, test, terms_lm),
     gam = run_gam_models(cal, test, terms_gam),
@@ -343,13 +457,15 @@ process_single_split <- function(split_set, all_splits_data, df_data, p) {
   ))
 }
 
+################################################################################
 
 # B. Configure and run the parallel job
+
+################################################################################
+
 n_splits <- 500
 set.seed(6)
 all_splits <- generate_multiple_splits(df, n_splits)
-
-# Set up parallel backend using 'multisession' (works on all OS)
 plan(multisession, workers = parallel::detectCores() - 1)
 
 cat("Starting parallel processing of", n_splits, "splits...\n")
@@ -377,8 +493,19 @@ with_progress({
 
 Sys.time()
 plan(sequential) # Shut down parallel workers
+# 10/03/2025 - ALL WAVENUMBERS< ETA = 12 minutes
+# 10/03/2025 - filtered, eta = 8 minutes filtered,
 # 15 minutes vs 1:10 or so non-parallel...!!!!!!
 
+# I NEEDED TO ADD IN CV TO MY PLS MODELS OTHERWISE I'M BIASING THE NUMBER OF COMPONENTS.
+# 10/07/2025 ALL WAVES with 10-fold CV on PLS models, now 45 minutes.  I think my PLS models will SUCK now......! (?)
+
+
+################################################################################
+
+# combine results
+
+################################################################################
 
 # C. Combine results from the parallel run
 cat("Aggregating results from parallel runs...\n")
@@ -400,13 +527,12 @@ all_results_means <- final_results %>%
 # 3. SIMPLE MODELS (PARALLELIZED) AND FINAL COMBINATION
 # ================================================================================= #
 
-# Filter data and generate splits (same as your original code)
+# Filter data and generate splits
 df_simple <- df[complete.cases(df$structure_weight), ]
 all_splits_simple <- generate_multiple_splits(df_simple, n_splits)
 
 
 ## 1. Define the "Worker" Function for a Single Split
-# This function contains the logic from one iteration of your original loop
 process_single_split_simple <- function(split_num, data, splits_list, p) {
   
   # Signal a progress update
@@ -477,8 +603,12 @@ for (i in 1:10) {
 return(list(results = split_results_simple, predictions = split_predictions_simple_fold))
 }
 
+################################################################################
 
 ## 2. Run the Simple Models in Parallel
+
+################################################################################
+
 cat("Starting parallel processing of", n_splits, "simple model splits...\n")
 plan(multisession, workers = availableCores() - 1) # Set up parallel backend
 Sys.time()
@@ -496,8 +626,12 @@ with_progress({
 Sys.time()
 plan(sequential) # Shut down parallel workers
 
+################################################################################
 
 ## 3. Combine Results and Post-Process
+
+################################################################################
+
 cat("Aggregating results from simple models...\n")
 
 # Extract the results and predictions from the list returned by the parallel run
@@ -507,7 +641,7 @@ simple_predictions <- lapply(parallel_results_simple, function(x) x$predictions)
 # Combine into single data frames
 simple_metrics <- dplyr::bind_rows(simple_metrics_list)
 
-# Your original code for calculating means and combining results works perfectly here
+# calculate means and combine results
 simple_results_means <- simple_metrics %>%
   group_by(Split, Model) %>%
   summarize(
@@ -520,7 +654,8 @@ simple_results_means <- simple_metrics %>%
 # Combine with the complex model results
 all_results_means_final <- rbind(all_results_means, simple_results_means)
 
-# Your original code for formatting predictions also works perfectly
+# format predictions
+
 simple_predictions_formatted <- list()
 for (split_set in seq_along(simple_predictions)) {
   for (fold in seq_along(simple_predictions[[split_set]])) {
@@ -543,7 +678,28 @@ rownames(simple_predictions_df) <- NULL
 # Combine with complex model predictions
 all_predictions_final <- rbind(final_predictions, simple_predictions_df)
 
+
+################################################################################
+
 # Save final objects
-saveRDS(all_results_means_final, paste0("RDS_dataframes/all_results_means_parallel", Sys.Date(), ".RDS"))
-saveRDS(all_predictions_final, paste0("RDS_dataframes/all_predictions_parallel", Sys.Date(), ".RDS"))
-saveRDS(final_importance_data, paste0("RDS_dataframes/final_importance_data_parallel", Sys.Date(), ".RDS"))
+
+################################################################################
+
+
+saveRDS(all_results_means_final, paste0("RDS_dataframes/all_results_means_parallel_LOOCV", Sys.Date(), ".RDS"))
+saveRDS(all_predictions_final, paste0("RDS_dataframes/all_predictions_parallel_LOOCV", Sys.Date(), ".RDS"))
+saveRDS(final_importance_data, paste0("RDS_dataframes/final_importance_data_parallel_LOOCV", Sys.Date(), ".RDS"))
+
+
+saveRDS(all_results_means_final, paste0("RDS_dataframes/LOOCV", Sys.Date(), ".RDS"))
+
+
+# IF FILTERED WAVENUMBERS
+# saveRDS(all_results_means_final, paste0("RDS_dataframes/filtered_all_results_means_parallel", Sys.Date(), ".RDS"))
+# saveRDS(all_predictions_final, paste0("RDS_dataframes/filtered_all_predictions_parallel", Sys.Date(), ".RDS"))
+# saveRDS(final_importance_data, paste0("RDS_dataframes/filtered_final_importance_data_parallel", Sys.Date(), ".RDS"))
+
+
+# saveRDS(all_results_means_final, paste0("RDS_dataframes/all_results_means_parallel", Sys.Date(), ".RDS"))
+# saveRDS(all_predictions_final, paste0("RDS_dataframes/all_predictions_parallel", Sys.Date(), ".RDS"))
+# saveRDS(final_importance_data, paste0("RDS_dataframes/final_importance_data_parallel", Sys.Date(), ".RDS"))

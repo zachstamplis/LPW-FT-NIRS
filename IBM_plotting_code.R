@@ -6,17 +6,36 @@ library(patchwork)
 library(gridExtra)
 library(cowplot)
 library(purrr)
+library(readxl)
 
 
 ibm <- readRDS("RDS_dataframes/IBM_proc_filter.RDS") %>%
   select(-c(haul, date_collected, read_age, test_age, final_age, scan_name, timestamp, file_name, session_title, file_path))
-ages <- read_xlsx("metadata/ibm_ages_07302025.xlsx") %>%
-  select(-c(avg_age, hatch_est, length, area, percent_affected, structure_weight)) %>%
+ages <- read_xlsx("metadata/ibm_ages_10032025.xlsx") %>% 
+  select(-c(avg_age, hatch_est)) %>%
   mutate(
+    # Calculate the mean of age1, age2, and age3 for each row
     avg_age = rowMeans(select(., age1, age2, age3), na.rm = TRUE),
+    # Calculate hatch estimate
     hatch_est = julian_date - avg_age
+  ) %>% 
+  # remove rows with NA for age1
+  filter(!is.na(age1)) %>%
+  # Group by row to perform row-wise operations
+  rowwise() %>%
+  # Calculate the standard deviation of the age estimates for each specimen
+  mutate(
+    age_sd = sd(c(age1, age2, age3), na.rm = TRUE)
   ) %>%
-  filter(!is.na(age1))
+  # Ungroup to return to normal dataframe operations
+  ungroup() %>%
+  # Calculate the coefficient of variation (CV) in percent
+  mutate(
+    age_cv_percent = (age_sd / avg_age) * 100
+  ) %>%
+  # Filter to keep rows with a CV of 10% or less, or where CV is not applicable
+  filter(age_cv_percent <= 10 | is.na(age_cv_percent)) %>% 
+  select(-age_sd, -age_cv_percent)
 
 df <- left_join(
   ages,
@@ -24,6 +43,8 @@ df <- left_join(
   by = c("specimen" = "specimen")
 ) %>%
   filter(specimen != 425970, run_number == 2)
+
+
 
 rm(ages, ibm)
 
@@ -39,9 +60,9 @@ color_palette <- c(
 
 # LOAD DATA # 
 
-all_results_means <- readRDS("RDS_dataframes/IBM_all_results_means_parallel2025-07-30.RDS")
-all_predictions <- readRDS("RDS_dataframes/IBM_all_predictions_parallel2025-07-30.RDS")
-final_importance_data <- readRDS("RDS_dataframes/IBM_final_importance_data_parallel2025-07-30.RDS")
+all_results_means <- readRDS("RDS_dataframes/IBM_filt_all_results_means_parallel2025-10-03.RDS")
+all_predictions <- readRDS("RDS_dataframes/IBM_filt_all_predictions_parallel2025-10-03.RDS")
+final_importance_data <- readRDS("RDS_dataframes/IBM_filt_final_importance_data_parallel2025-10-03.RDS")
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # 2. Global Data Preparation ----
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#

@@ -167,6 +167,14 @@ best_params_rf <- data.frame(
 # Functions for each model type ======================================================
 # ====================================================================================#
 # ====================================================================================#
+
+# Find number of PC's for each of 10 models: 
+pc_counts_lm <- sapply(terms_lm, function(term) {
+  # The 'term' object has an attribute 'nterms' which is what we need
+  attr(term, "nterms")
+})
+
+
 run_lm_models <- function(cal, test, terms_lm) {
   splits_results_lm <- data.frame()
   all_predictions <- list()  # To store predictions for all folds
@@ -180,14 +188,16 @@ run_lm_models <- function(cal, test, terms_lm) {
       RMSE = numeric(10),
       RPD = numeric(10),
       Bias = numeric(10),
-      PercentRMSE = numeric(10)
+      PercentRMSE = numeric(10),
+      Components = numeric(10)
     )
     # Initialize prediction storage for this fold
     fold_preds <- list(
       specimen_number = testing$specimen,
       actual = testing$read_age,
-      model_preds = vector("list", 10)  # One slot per model combination
-    )
+      model_preds = vector("list", 10),  # One slot per model combination
+      model_comps = vector("list", 10)
+      )
     
     for (j in 1:10) {
       mod <- lm(data = calibrate, terms_lm[[j]])
@@ -201,9 +211,11 @@ run_lm_models <- function(cal, test, terms_lm) {
       fold_results$R2[j] <- 1 - (RSS / TSS)
       fold_results$RPD[j] <- calculate_rpd(testing$read_age, preds)
       fold_results$Bias[j] <- calculate_bias(testing$read_age, preds)
+      fold_results$Components[j] <- pc_counts_lm[j]
       
       # Store predictions
       fold_preds$model_preds[[j]] <- preds
+      fold_preds$model_comps[[j]] <- pc_counts_lm[j]
     }
     
     splits_results_lm <- rbind(splits_results_lm, fold_results)
@@ -215,6 +227,15 @@ run_lm_models <- function(cal, test, terms_lm) {
 }
 # ================================================================================#
 # ================================================================================#
+
+# find num. comps for GAM:
+pc_counts_gam <- sapply(terms_gam, function(formula) {
+  # Your original method for GAMs is correct and effective
+  formula_str <- as.character(formula)[3]
+  stringr::str_count(formula_str, "PC\\d+")
+})
+
+
 run_gam_models <- function(cal, test, terms_gam) {
   splits_results_gam <- data.frame()
   all_predictions <- list()  # To store predictions for all folds
@@ -230,14 +251,16 @@ run_gam_models <- function(cal, test, terms_gam) {
       RMSE = numeric(10),
       RPD = numeric(10),
       Bias = numeric(10),
-      PercentRMSE = numeric(10)
+      PercentRMSE = numeric(10),
+      Components = numeric(10)
     )
     
     # Initialize prediction storage for this fold
     fold_preds <- list(
       specimen_number = testing$specimen,
       actual = testing$read_age,
-      model_preds = vector("list", 10)  # One slot per model combination
+      model_preds = vector("list", 10),
+      model_comps = vector("list", 10)
     )
     
     for (j in 1:10) {
@@ -252,9 +275,11 @@ run_gam_models <- function(cal, test, terms_gam) {
       fold_results$R2[j] <- 1 - (RSS / TSS)
       fold_results$RPD[j] <- calculate_rpd(testing$read_age, preds)
       fold_results$Bias[j] <- calculate_bias(testing$read_age, preds)
+      fold_results$Components[j] <- pc_counts_gam[j]
       
       # Store predictions
       fold_preds$model_preds[[j]] <- preds
+      fold_preds$model_comps[[j]] <- pc_counts_gam[j]
     }
     
     splits_results_gam <- rbind(splits_results_gam, fold_results)
@@ -262,20 +287,6 @@ run_gam_models <- function(cal, test, terms_gam) {
   }
   
   splits_results_gam$ModelType <- "GAM"
-  
-  # Add PC counts
-  pc_counts_gam <- sapply(terms_gam, function(formula) {
-    formula_str <- as.character(formula)[3]
-    pc_count <- stringr::str_count(formula_str, "PC\\d+")
-    return(pc_count)
-  })
-  
-  components_map <- data.frame(
-    Model = paste0("GAM ", 1:10),
-    Components = pc_counts_gam
-  )
-  
-  splits_results_gam <- merge(splits_results_gam, components_map, by = "Model", all.x = TRUE)
   
   return(list(results = splits_results_gam, predictions = all_predictions))
 }
@@ -307,12 +318,14 @@ run_pls_models <- function(cal, test) {
       specimen_number = testing$specimen,
       actual = testing$read_age,
       pls_pred = numeric(length(testing$read_age)),
-      vip_pred = numeric(length(testing$read_age))
+      vip_pred = numeric(length(testing$read_age)),
+      pls_ncomp = NA_integer_,
+      vip_ncomp = NA_integer_ 
     )
     
     # PLS model
     mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
-                         scale = F, center = T, 
+                         scale = F, center = T, cv=1, 
                          x.test = testing[, 31:ncol(testing)],
                          y.test = testing[, "read_age"])
     ncomp <- mod$ncomp.selected
@@ -340,11 +353,12 @@ run_pls_models <- function(cal, test) {
     
     # Store predictions
     fold_preds$pls_pred <- mod$testres$y.pred[, ncomp,]
+    fold_preds$pls_ncomp <- ncomp
     
     # VIP model #
     vip <- as.data.frame(vipscores(mod))
     mod <- mdatools::pls(calibrate[, 31:ncol(calibrate)], calibrate[, "read_age"],
-                         scale = F, center = T,
+                         scale = F, center = T, cv=1
                          x.test = testing[, 31:ncol(testing)],
                          y.test = testing[, "read_age"],
                          exclcols = vip$V1 < 0.5)
@@ -360,6 +374,7 @@ run_pls_models <- function(cal, test) {
     
     # Store predictions
     fold_preds$vip_pred <- mod$testres$y.pred[, ncomp,]
+    fold_preds$vip_ncomp <- ncomp
     
     # Append to results
     splits_results_pls <- rbind(splits_results_pls, fold_results)
@@ -437,7 +452,8 @@ run_xgb_models <- function(cal, test) {
     fold_preds <- list(
       specimen_number = testing$specimen,
       actual = y_test,
-      xgb_pred = preds
+      xgb_pred = preds,
+      components = NA_integer_
     )
     
     # Calculate metrics
@@ -453,7 +469,7 @@ run_xgb_models <- function(cal, test) {
       RPD = calculate_rpd(y_test, preds),
       Bias = calculate_bias(y_test, preds),
       PercentRMSE = rmse_val / max(y_test) * 100,
-      Components = xgb_model$best_iteration
+      fold_results$Components <- NA_integer_
     )
     
     # Append results
@@ -480,7 +496,8 @@ run_rf_models <- function(cal, test) {
     fold_preds <- list(
       specimen_number = testing$specimen,
       actual = testing$read_age,
-      rf_pred = numeric(length(testing$read_age))
+      rf_pred = numeric(length(testing$read_age)),
+      components = NA_integer_
     )
     
     fold_results <- data.frame(
@@ -527,7 +544,7 @@ run_rf_models <- function(cal, test) {
     fold_results$RPD <- calculate_rpd(testing$read_age, preds)
     fold_results$Bias <- calculate_bias(testing$read_age, preds)
     fold_results$PercentRMSE <- fold_results$RMSE / max(testing$read_age) * 100
-    fold_results$Components <- 500
+    fold_results$Components <- NA_integer_
     
     splits_results_rf <- rbind(splits_results_rf, fold_results)
     all_predictions[[i]] <- fold_preds
@@ -782,10 +799,20 @@ all_results_means <- final_results %>%
     RPD = mean(RPD),
     Bias = mean(Bias),
     PercentRMSE = mean(PercentRMSE),
-    Components = mean(Components),
+    # KEY CHANGE: Calculate Min and Max, then combine into a range string
+    Min_Components = min(Components, na.rm = TRUE),
+    Max_Components = max(Components, na.rm = TRUE),
     N = n()
   ) %>%
-  ungroup()
+  ungroup() %>%
+  # Create a clean string for your final table
+  mutate(
+    Component_Range = case_when(
+      is.infinite(Min_Components) ~ NA_character_, # Handle cases with all NAs
+      Min_Components == Max_Components ~ as.character(Min_Components),
+      TRUE ~ paste(Min_Components, Max_Components, sep = "-")
+    )
+  )
 rm(i,m,split_set,splits,cal,test, model_results, pc.mod)
 # =================================================================================#
 # =================================================================================#
@@ -826,7 +853,9 @@ run_multiple_splits_simple_models <- function(data, splits_list, n_splits = 500)
         specimen_number = testing$specimen,
         actual = testing$read_age,
         simple_lm_pred = numeric(length(testing$read_age)),
-        simple_gam_pred = numeric(length(testing$read_age))
+        simple_gam_pred = numeric(length(testing$read_age)),
+        simple_lm_ncomp = 3,
+        simple_gam_ncomp = 3,
       )
 
       # Create dataframe for this fold's results

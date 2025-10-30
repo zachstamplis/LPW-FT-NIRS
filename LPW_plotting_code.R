@@ -24,9 +24,19 @@ color_palette <- c(
 
 df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 df <- df[complete.cases(df$read_age), ]
-all_results_means <- readRDS("RDS_dataframes/all_results_means_parallel2025-07-21.RDS")
-all_predictions <- readRDS("RDS_dataframes/all_predictions_parallel2025-07-21.RDS")
-final_importance_data <- readRDS("RDS_dataframes/final_importance_data_parallel2025-07-21.RDS")
+df <- df %>% filter(specimen != 53, specimen != 74)
+
+
+
+temp1 <- readRDS("RDS_dataframes/all_results_means_parallel_LOOCV_2025-10-14.RDS")
+
+temp2 <- readRDS("RDS_dataframes/all_results_means_temp2025-10-14.RDS")
+
+
+
+
+all_predictions <- readRDS("RDS_dataframes/all_predictions_parallel_LOOCV_temp2025-10-14.RDS")
+final_importance_data <- readRDS("RDS_dataframes/final_importance_data_parallel_LOOCV_temp2025-10-14.RDS")
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # 2. Global Data Preparation ----
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
@@ -38,6 +48,10 @@ best_pca_models <- all_results_means %>%
   summarise(Overall_Mean_RMSE = mean(RMSE, na.rm = TRUE), .groups = "drop") %>%
   group_by(ModelType) %>%
   slice_min(order_by = Overall_Mean_RMSE, n = 1)
+
+# Now, we extract the names of the winning model variants to use for filtering
+best_model_variants <- best_pca_models$Model
+
 
 # Define the desired final order for models and categories
 final_model_order <- c("LM", "GAM", "PLS (VIP)", "XGB", "RF", "LM (Simple)", "GAM (Simple)")
@@ -78,12 +92,12 @@ create_boxplot <- function(data, y_var, y_lab, show_x_axis = FALSE) {
     scale_fill_manual(values = color_palette) +
     scale_x_discrete(labels = function(x) str_replace(x, " \\(", "\n(")) +
     labs(y = y_lab, x = NULL) +
-    theme_bw(base_size = 11) +
+    theme_bw(base_size = 13.5) +
     theme(legend.position = "none")
   if (!show_x_axis) { p <- p + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) }
   return(p)
 }
-p_rmse <- create_boxplot(all_results_cleaned, RMSE, "RMSE (days)")
+p_rmse <- create_boxplot(all_results_cleaned, RMSE, "RMSE (Days)")
 p_r2 <- create_boxplot(all_results_cleaned, R2, expression(R^2))
 p_bias <- create_boxplot(all_results_cleaned, Bias, "Bias (Days)", show_x_axis = TRUE) +
   geom_hline(yintercept = 0, color = "gray40", linewidth = 1, linetype = 2)
@@ -210,11 +224,16 @@ hatch_estimates_cleaned <- hatch_estimates %>%
 original_data <- df %>%
   select(specimen_number = specimen, original_hatch_date = hatch_date)
 
+# --- MODIFICATION 1: Extract p-value along with D-statistic ---
 ks_results <- map_dfr(levels(hatch_estimates_cleaned$Model), ~{
   estimates_subset <- hatch_estimates_cleaned %>% filter(Model == .x)
   originals_subset <- original_data %>% filter(specimen_number %in% estimates_subset$specimen_number)
   ks_test <- ks.test(estimates_subset$median_hatch, originals_subset$original_hatch_date)
-  tibble(Model = .x, D_statistic = ks_test$statistic)
+  tibble(
+    Model = .x,
+    D_statistic = ks_test$statistic,
+    p_value = ks_test$p.value # <-- ADD THIS LINE
+  )
 })
 
 original_dates <- df %>%
@@ -236,9 +255,13 @@ ecdf_differences <- hatch_estimates_cleaned %>%
   tidyr::unnest(diff_data) %>%
   left_join(ks_results, by = "Model") %>%
   left_join(model_type_lookup, by = "Model") %>%
-  mutate(ks_label = sprintf("D = %.3f", D_statistic)) %>%
-  
-  # --- FIX: Re-apply the factor levels to ensure correct plot order ---
+  # --- MODIFICATION 2: Update the label to include the p-value ---
+  mutate(
+    # Format p-value for readability (e.g., show "p < 0.001" for very small values)
+    p_label = if_else(p_value < 0.001, "p < 0.001", sprintf("p = %.3f", p_value)),
+    ks_label = sprintf("D = %.3f\n%s", D_statistic, p_label) # <-- UPDATE THIS LINE
+  ) %>%
+  # Re-apply the factor levels to ensure correct plot order
   mutate(Model = factor(Model, levels = final_model_order))
 
 
@@ -246,20 +269,372 @@ ecdf_differences <- hatch_estimates_cleaned %>%
 ggplot(ecdf_differences, aes(x = hatch_date, y = ecdf_difference)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
   geom_step(aes(color = ModelType, group = Model), linewidth = .7) +
-  geom_text(aes(label = ks_label), x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5,
-            size = 3, check_overlap = TRUE) +
+  geom_text(aes(label = ks_label), x = -Inf, y = Inf, hjust = -0.1, vjust = 1.2, # Adjusted vjust for two lines
+            size = 3, check_overlap = TRUE, lineheight = .9) +
   scale_color_manual(values = color_palette, name = "Model Type") +
   facet_wrap(~ Model, ncol = 4) +
   labs(
     title = "ECDF Difference (Estimate - Original) of Hatch Dates",
-    subtitle = "Deviation from the zero-line indicates model error",
+    subtitle = "Deviation from the zero-line indicates model error. D and p-values from K-S test shown.",
     x = "Hatch Date",
     y = "ECDF Difference"
   ) +
   theme_bw() +
   theme(legend.position = "bottom", strip.background = element_rect(fill = "gray90"))
 
+
 # --- Clean up environment ---
 rm(hatch_estimates, hatch_estimates_cleaned, original_data, ks_results, 
    original_dates, calculate_ecdf_diff, model_type_lookup, ecdf_differences,
    best_lm_in_preds, best_gam_in_preds)
+
+
+
+
+
+
+
+################################################################################
+################################################################################
+# Model performance comparison
+################################################################################
+################################################################################
+
+
+# Calculate and rank models by their median RMSE
+performance_rankings <- all_results_cleaned %>%
+  group_by(Model) %>%
+  summarise(Median_RMSE = median(RMSE, na.rm = TRUE)) %>%
+  arrange(Median_RMSE) # Arrange from lowest (best) to highest (worst)
+
+print("--- Model Rankings by Overall Performance (Median RMSE) ---")
+print(performance_rankings)
+
+# First, create a "wide" dataframe where each row is an iteration and each column is a model
+wide_results <- all_results_cleaned %>%
+  select(Model, RMSE, SplitSet) %>%
+  pivot_wider(names_from = Model, values_from = RMSE)
+
+# For each row (iteration), find the column name (model) with the minimum RMSE
+# Note: `.[-1]` is used to exclude the 'iteration' column from the min calculation
+winners <- apply(wide_results[, -1], 1, function(row) {
+  names(row)[which.min(row)]
+})
+
+
+# Count the wins for each model
+consistency_rankings <- as.data.frame(table(winners)) %>%
+  rename(Model = winners, Win_Count = Freq) %>%
+  arrange(desc(Win_Count)) # Arrange from most wins to fewest
+
+print("--- Model Rankings by Consistency (Number of Wins out of 500) ---")
+print(consistency_rankings)
+
+
+library(rstatix)
+library(ggpubr)
+library(dplyr)
+
+# Assuming the rows in `all_results_cleaned` correspond to the same CV iteration
+# We add an ID to represent the "pairing" variable.
+# If you have an iteration column already, use that instead.
+# all_results_cleaned <- all_results_cleaned %>%
+#   group_by(Model) %>%
+#   mutate(iteration = row_number()) %>%
+#   ungroup()
+
+# 1. Perform the Friedman Test (Omnibus Test) for RMSE
+friedman_test_result <- all_results_cleaned %>%
+  friedman_test(RMSE ~ Model | SplitSet)
+
+print(friedman_test_result)
+# A significant p-value (e.g., p < 0.05) indicates that at least one model's
+# RMSE distribution is different from the others.
+
+# 2. Perform Pairwise Wilcoxon Signed-Rank Tests (Post-Hoc)
+# This compares every model against every other model.
+pwc_results <- all_results_cleaned %>%
+  wilcox_test(
+    RMSE ~ Model,
+    paired = TRUE,
+    p.adjust.method = "holm" # Holm-Bonferroni correction
+  )
+
+print(pwc_results)
+
+
+
+
+
+
+
+# R code to calculate the CV of RMSE for each model - indicates stability
+stability_analysis <- all_results_cleaned %>%
+  group_by(Model) %>%
+  summarise(
+    Mean_RMSE = mean(RMSE, na.rm = TRUE),
+    SD_RMSE = sd(RMSE, na.rm = TRUE),
+    CV_RMSE = (SD_RMSE / Mean_RMSE) * 100  # CV as a percentage
+  ) %>%
+  arrange(CV_RMSE) # Sort by most stable (lowest CV)
+
+print(stability_analysis)
+
+
+
+
+# Assuming 'all_predictions' has 'predicted' and 'read_age' columns
+# You might want to average the predictions for each fish across the 500 iterations first
+# Define the final order and color palette for consistency
+final_model_order <- c("LM", "GAM", "PLS (VIP)", "XGB", "RF", "LM (Simple)", "GAM (Simple)")
+color_palette <- c(
+  "PCA"    = "#4477AA",
+  "PLS"    = "#AA3377",
+  "ML"     = "#228833",
+  "Simple" = "#CCBB44"
+)
+
+# Filter the main predictions dataframe and clean up model names
+predictions_for_plot <- all_predictions %>%
+  filter(
+    model_variant %in% best_model_variants | !model_type %in% c("LM", "GAM")
+  ) %>%
+  mutate(
+    Model = case_when(
+      model_variant %in% best_model_variants & model_type == "LM" ~ "LM",
+      model_variant %in% best_model_variants & model_type == "GAM" ~ "GAM",
+      model_variant == "PLS-VIP"                                   ~ "PLS (VIP)",
+      model_variant == "XGBoost"                                   ~ "XGB",
+      model_variant == "RF"                                        ~ "RF",
+      model_variant == "Simple LM"                                 ~ "LM (Simple)",
+      model_variant == "Simple GAM"                                ~ "GAM (Simple)",
+      TRUE                                                         ~ NA_character_
+    ),
+    ModelType = case_when(
+      Model %in% c("LM", "GAM")                   ~ "PCA",
+      Model == "PLS (VIP)"                        ~ "PLS",
+      Model %in% c("XGB", "RF")                   ~ "ML",
+      Model %in% c("LM (Simple)", "GAM (Simple)") ~ "Simple",
+      TRUE                                        ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Model)) %>%
+  mutate(Model = factor(Model, levels = final_model_order))
+
+# Calculate the average prediction and residual for each fish
+avg_predictions <- predictions_for_plot %>%
+  group_by(specimen_number, Model, ModelType, actual) %>%
+  summarise(avg_predicted_age = mean(predicted, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(residual = avg_predicted_age - actual)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# 3. Create the Final Plot ----
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+ggplot(avg_predictions, aes(x = actual, y = residual)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_point(aes(color = ModelType), alpha = 0.6, size = 1.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "#002244", linewidth = 1) +
+  scale_color_manual(values = color_palette, name = "Model Type") +
+  facet_wrap(~ Model, ncol = 3) +
+  labs(
+    x = "Actual Age (Days)",
+    y = "Prediction Error (Predicted - Actual)"
+  ) +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "bottom", strip.background = element_rect(fill = "gray90"))
+
+
+
+
+################################################################################
+################################################################################
+# MODEL PERFORMANCE TABLES
+################################################################################
+################################################################################
+
+
+
+
+
+
+
+
+
+
+
+# Define your color palette
+color_palette <- c(
+  "PCA"    = "#4477AA", # Linear and GAM models
+  "PLS"    = "#AA3377", # PLS models
+  "ML"     = "#228833", # RF and XGB models
+  "Simple" = "#CCBB44"  # Simple LM and GAM
+)
+
+# Prepare the data with the corrected logic
+table_data_full <- all_results_means %>%
+  mutate(
+    # Ensure model names are "Linear X" to match your image
+    Model = str_replace(Model, "^LM ", "Linear "),
+    Model = str_replace(Model, "Simple lm", "Simple LM"),
+    Model = str_replace(Model, "Simple gam", "Simple GAM"),
+    # CORRECTED: This now properly detects "Linear" and "GAM" models
+    ModelType = case_when(
+      str_detect(Model, "Linear|GAM ") ~ "PCA",
+      str_detect(Model, "PLS") ~ "PLS",
+      Model %in% c("XGB", "RF") ~ "ML",
+      str_detect(Model, "Simple") ~ "Simple",
+      TRUE ~ as.character(ModelType)
+    )
+  ) %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  arrange(RMSE)
+
+max_abs_bias_full <- max(abs(table_data_full$Bias))
+
+# Create the gt object
+table_to_export_full <- table_data_full %>%
+  select(-ModelType) %>%
+  gt() %>%
+  data_color(columns = RMSE, palette = c("#63BE7B", "#FFEB84", "#F8696B")) %>%
+  data_color(columns = R2, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  data_color(columns = Bias, palette = c("#F8696B", "#63BE7B", "#F8696B"), domain = c(-max_abs_bias_full, 0, max_abs_bias_full)) %>%
+  data_color(columns = RPD, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  fmt_number(columns = c(RMSE, R2, Bias, RPD), decimals = 3) %>%
+  tab_options(column_labels.border.bottom.width = px(2), column_labels.border.bottom.color = "black", table_body.hlines.color = "#ededed")
+
+# Loop through to color the Model cells
+for (type_name in names(color_palette)) {
+  table_to_export_full <- table_to_export_full %>%
+    tab_style(
+      style = cell_fill(color = color_palette[[type_name]], alpha = 0.5),
+      locations = cells_body(columns = Model, rows = table_data_full$ModelType == type_name)
+    )
+}
+
+
+table_to_export_full
+
+
+# Define your color palette
+color_palette <- c(
+  "PCA"    = "#4477AA", # MLR and GAM models
+  "PLS"    = "#AA3377", # PLS models
+  "ML"     = "#228833", # RF and XGB models
+  "Simple" = "#CCBB44"  # Simple LM and GAM
+)
+
+# --- 1. Find the single best LM (MLR) model ---
+best_mlr <- all_results_means %>%
+  filter(ModelType == "LM") %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  slice_min(order_by = RMSE, n = 1)
+
+# --- 2. Find the single best GAM model ---
+best_gam <- all_results_means %>%
+  filter(ModelType == "GAM") %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  slice_min(order_by = RMSE, n = 1)
+
+# --- 3. Summarize all other model types ---
+other_models <- all_results_means %>%
+  filter(!ModelType %in% c("LM", "GAM")) %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+
+# --- 4. Combine and apply final renaming for the table ---
+table_data_filtered <- bind_rows(best_mlr, best_gam, other_models) %>%
+  mutate(
+    # Rename the selected models to their general names
+    Model = case_when(
+      ModelType == "LM" ~ "MLR",
+      ModelType == "GAM" ~ "GAM",
+      Model == "Simple lm" ~ "Simple LM",
+      Model == "Simple gam" ~ "Simple GAM",
+      TRUE ~ Model
+    ),
+    # Re-assign ModelType for coloring
+    ModelType = case_when(
+      ModelType %in% c("LM", "GAM") ~ "PCA",
+      ModelType %in% c("RF", "XGB") ~ "ML",
+      TRUE ~ as.character(ModelType)
+    )
+  ) %>%
+  arrange(RMSE)
+
+max_abs_bias_filtered <- max(abs(table_data_filtered$Bias))
+
+# Define your color palette
+color_palette <- c(
+  "PCA"    = "#4477AA", # MLR and GAM models
+  "PLS"    = "#AA3377", # PLS models
+  "ML"     = "#228833", # RF and XGB models
+  "Simple" = "#CCBB44"  # Simple LM and GAM
+)
+
+# --- 1. Find the single best LM (MLR) model ---
+best_mlr <- all_results_means %>%
+  filter(ModelType == "LM") %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  slice_min(order_by = RMSE, n = 1)
+
+# --- 2. Find the single best GAM model ---
+best_gam <- all_results_means %>%
+  filter(ModelType == "GAM") %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop") %>%
+  slice_min(order_by = RMSE, n = 1)
+
+# --- 3. Summarize all other model types ---
+other_models <- all_results_means %>%
+  filter(!ModelType %in% c("LM", "GAM")) %>%
+  group_by(Model, ModelType) %>%
+  summarise(across(c(RMSE, R2, Bias, RPD), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+
+# --- 4. Combine and apply final renaming for the table ---
+table_data_filtered <- bind_rows(best_mlr, best_gam, other_models) %>%
+  mutate(
+    Model = case_when(
+      ModelType == "LM" ~ "MLR",
+      ModelType == "GAM" ~ "GAM",
+      Model == "Simple lm" ~ "Simple LM",
+      Model == "Simple gam" ~ "Simple GAM",
+      TRUE ~ Model
+    ),
+    ModelType = case_when(
+      ModelType %in% c("LM", "GAM") ~ "PCA",
+      ModelType %in% c("RF", "XGB") ~ "ML",
+      TRUE ~ as.character(ModelType)
+    )
+  ) %>%
+  arrange(RMSE)
+
+max_abs_bias_filtered <- max(abs(table_data_filtered$Bias))
+
+# --- 5. Create the gt object ---
+filtered_table_final <- table_data_filtered %>%
+  select(-ModelType) %>%
+  gt() %>%
+  data_color(columns = RMSE, palette = c("#63BE7B", "#FFEB84", "#F8696B")) %>%
+  # CORRECTED LINE: Added the missing quote before #63BE7B
+  data_color(columns = R2, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  data_color(columns = Bias, palette = c("#F8696B", "#63BE7B", "#F8696B"), domain = c(-max_abs_bias_filtered, 0, max_abs_bias_filtered)) %>%
+  data_color(columns = RPD, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  fmt_number(columns = c(RMSE, R2, Bias, RPD), decimals = 3) %>%
+  tab_options(column_labels.border.bottom.width = px(2), column_labels.border.bottom.color = "black", table_body.hlines.color = "#ededed")
+
+# --- 6. Loop to color the Model cells ---
+for (type_name in names(color_palette)) {
+  filtered_table_final <- filtered_table_final %>%
+    tab_style(
+      style = cell_fill(color = color_palette[[type_name]], alpha = 0.5),
+      locations = cells_body(columns = Model, rows = table_data_filtered$ModelType == type_name)
+    )
+}
+
+# View the final table in RStudio
+filtered_table_final

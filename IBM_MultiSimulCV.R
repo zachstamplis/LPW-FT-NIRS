@@ -10,8 +10,8 @@ rm(installed_packages, packages)
 # icp_ms <- readRDS("RDS_dataframes/ICP-MS_updated.RDS")
 ibm <- readRDS("RDS_dataframes/IBM_proc_filter.RDS") %>%
   select(-c(haul, date_collected, read_age, test_age, final_age, scan_name, timestamp, file_name, session_title, file_path))
-ages <- read_xlsx("metadata/ibm_ages_07302025.xlsx") %>% 
-  select(-c(avg_age, hatch_est, length, area, percent_affected, structure_weight)) %>%
+ages <- read_xlsx("metadata/ibm_ages_10032025.xlsx") %>% 
+  select(-c(avg_age, hatch_est)) %>%
   mutate(
     # Calculate the mean of age1, age2, and age3 for each row
     avg_age = rowMeans(select(., age1, age2, age3), na.rm = TRUE),
@@ -19,7 +19,24 @@ ages <- read_xlsx("metadata/ibm_ages_07302025.xlsx") %>%
     hatch_est = julian_date - avg_age
   ) %>% 
   # remove rows with NA for age1
-  filter(!is.na(age1))
+  filter(!is.na(age1)) %>%
+  # Group by row to perform row-wise operations
+  rowwise() %>%
+  # Calculate the standard deviation of the age estimates for each specimen
+  mutate(
+    age_sd = sd(c(age1, age2, age3), na.rm = TRUE)
+  ) %>%
+  # Ungroup to return to normal dataframe operations
+  ungroup() %>%
+  # Calculate the coefficient of variation (CV) in percent
+  mutate(
+    age_cv_percent = (age_sd / avg_age) * 100
+  ) %>%
+  # Filter to keep rows with a CV of 10% or less, or where CV is not applicable
+  filter(age_cv_percent <= 10 | is.na(age_cv_percent)) %>% 
+  select(-age_sd, age_cv_percent)
+
+
 
 df <- left_join(
   ages, 
@@ -349,7 +366,7 @@ run_pls_models <- function(cal, test) {
     
     # PLS model
     mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"],
-                         scale = F, center = T, 
+                         scale = F, center = T, cv = 1,
                          x.test = testing[, 40:ncol(testing)],
                          y.test = testing[, "avg_age"])
     ncomp <- mod$ncomp.selected
@@ -381,7 +398,7 @@ run_pls_models <- function(cal, test) {
     # VIP model #
     vip <- as.data.frame(vipscores(mod))
     mod <- mdatools::pls(calibrate[, 40:ncol(calibrate)], calibrate[, "avg_age"],
-                         scale = F, center = T,
+                         scale = F, center = T, cv = 1,
                          x.test = testing[, 40:ncol(testing)],
                          y.test = testing[, "avg_age"],
                          exclcols = vip$V1 < 0.5)

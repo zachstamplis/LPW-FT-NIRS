@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ImageSets fileID="MediaCy Image Sets" fileVersion="1" fullPath="E:\ICP-MS Images\ICPMS_03_20x_XY1.ome.mcs" name="ICPMS_03_20x_XY1.ome.mcs" description="">
+
+	<ImageSet name="ICPMS_03_20x_XY1.ome.mcs" description="" experimenter="" dimensionCount="1" imageCount="1" frameCount="16" isComplete="true" isCompact="true" isEmpty="false" creationDate="2025-05-10T19:58:26Z" modifiedDate="2025-05-10T21:23:34.928Z" activeDimension="ScanPositions" frameRate="33.3333333333333" wrapType="None" hasThumbnail="false" xPixelSize="0.374649" yPixelSize="0.374649" unitPixelSize="um" lensNumericalAperture="0.45" lensRefractiveIndex="1">
+		<Dimensions>
+			<Dimension dimType="ZPositions" dimLength="16"/>
+		</Dimensions>
+
+		<Channels>
+			<ImageChannel name="RGB" description="" userFlags="1" acquire="-1" acquireFrequency="0" displayFlags="1" brightness="50" contrast="50" gamma="1" blackLevel="0" whiteLevel="255" BitsPerChannel="8" TypeInterpretation="RGB" PixelDataType="Integer" ChannelsPerPixel="3">
+				<MiscChannelInfo>
+					<VAR Name="SpatialCalib" Rev="1">h6nN/gAAAgARIAAAAQAAAAEAAAAgAAAAAQAQAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAACgAA0M8R4KGxGuEAAAAAAAAAAAAAAAAAAAAAPgADAP7/CQAGAAAAAAAAAAAAAAABAAAAAQAAAAAAAAAAEAAAAgAAAAEAAAD+////AAAAAAAAAAD////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////9/////v////7////+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////1IAbwBvAHQAIABFAG4AdAByAHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWAAUA//////////8BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAMAAAAAAAAAATQBjAFMAcABhAHQAaQBhAGwAQwBhAGwAaQBiAFYAMQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACIAAQH//////////wIAAABfIvSxG50cQJztcc665pvuAAAAAHDrgMnxwdsBcOuAyfHB2wEAAAAAAAAAAAAAAABNAGMAUwBwAGEAdABpAGEAbABDAGEAbABpAGIAVgAxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIgACAf///////////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAIAAAD+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////9NY1NwYXRpYWxDYWxpYiBWNC4wABEAAABJAEMAUABNAFMAXwAwADIAXwAyADAAeABfAGMAcgBvAHAAAwAAAKSpnsw/+tc/pKmezD/61z8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAtQBtAI3ttaD3xrA+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</VAR>
+					<VAR Name="SetAnnotations" Rev="1">h6nN/gAAAgARIAAAAQAAAAEAAAAgAAAAAQAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAADAAA0M8R4KGxGuEAAAAAAAAAAAAAAAAAAAAAPgADAP7/CQAGAAAAAAAAAAAAAAABAAAAAQAAAAAAAAAAEAAAAgAAAAEAAAD+////AAAAAAAAAAD////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////9/////v////7///8EAAAA/v///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////1IAbwBvAHQAIABFAG4AdAByAHkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWAAUA//////////8BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAMADAAAAAAAATQBjAEkAbQBhAGcAZQBTAGUAdAAuAEEAbgBuAG8AdABhAHQAaQBvAG4ATwB2AGUAcgBsAGEAeQAAAAAAAAAAADoAAQH//////////wIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHDrgMnxwdsBcOuAyfHB2wEAAAAAAAAAAAAAAABNAGMASQBtAGEAZwBlAFMAZQB0AC4AQQBuAG4AbwB0AGEAdABpAG8AbgBPAHYAZQByAGwAYQB5AAAAAAAAAAAAOgACAf///////////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACJAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA////////////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAIAAAADAAAABAAAAAUAAAAGAAAABwAAAAgAAAAJAAAACgAAAAsAAAAMAAAADQAAAA4AAAD+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////wsADgBDbUdyYXBoT3ZlcmxheQIAAAAcTWNJbWFnZVNldC5Bbm5vdGF0aW9uT3ZlcmxheQoAAAD/////AAAAAAEAAAAAAAAAB0xheWVyIDBkAAAAAQAAAAEAAAAHTGF5ZXIgMWQAAAABAAAAAgAAAAdMYXllciAyZAAAAAEAAAADAAAAB0xheWVyIDNkAAAAAQAAAAQAAAAHTGF5ZXIgNGQAAAABAAAABQAAAAdMYXllciA1ZAAAAAEAAAAGAAAAB0xheWVyIDZkAAAAAQAAAAcAAAAHTGF5ZXIgN2QAAAABAAAACAAAAAdMYXllciA4ZAAAAAEAAAAJAAAAB0xheWVyIDlkAAAAAAAAAAAAAAAAAAAA/////wAAAAD/////AAAAAP////8AAAAA/////wAAAAD/////AAAAAP////8AAAAA/////wAAAAD/////AAAAAP////8AAAAA/////wAAAAAAAAAAyAAAAMgAAAAZR3JhcGhpYyBPYmplY3QgUHJvcGVydGllc8gAAADIAAAAGkdyYXBoaWMgT3ZlcmxheSBQcm9wZXJ0aWVzAAAAAJ/rj5fBSEVAAAAAAgQEACAAAAB2mNrsAAABAAAAAAAMAAAAh6nN/gAAAgAAAAAAAAAAAGQAAAAAAAAA////f////3////9/////f3Y7dzDRQu5/djt3MNFC7n+eyX9/nsl/f57Jf3+eyX9/AQAAAP//DQAOAENtR3JhcGhPYmpMaW5lAQAAAGM3AAACAAAAAAEAACLbx0NwIQlEAQAAAAAAAAAEAAAABAAAAP//AAAAAAAAAAAAAP//gAAAAAAAAwAAAAIAAAABAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAD/////AAAAAAAAAAAAAAAAZAAAAAAAAAAAAAAAAAAAAP/+/wD//v8ABAAAALAAAAB2mNrsAAABAAAAAAAMAAAAh6nN/gAAAgAAAAAABAAAAAoAAAAcAAAAh6nN/gAAAgAFAAAACAAAAAgAAAAAAAAAACCZQAsAAAAcAAAAh6nN/gAAAgAFAAAACAAAAAgAAAAAAAAAACCZQAwAAAAcAAAAh6nN/gAAAgAFAAAACAAAAAgAAAAAAAAASn7iPw0AAAAcAAAAh6nN/gAAAgAFAAAACAAAAAgAAACf64+XwUhFQAAAAAAAAAAA/////5HmLUS0h8PDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</VAR>
+				</MiscChannelInfo>
+				<ImageProperties>
+					<STR Name="McProperties::LensName">S Plan Fluor ELWD 20x DIC N1</STR>
+					<R8 Name="McProperties::NumericalAperture">0.45</R8>
+					<STR Name="McProperties::LensMedium">Air</STR>
+					<R8 Name="McProperties::RefractiveIndex">1</R8>
+				</ImageProperties>
+			</ImageChannel>
+		</Channels>
+
+		<ScanPositions name="" description="" coordinateType="Cartesian" scanType="0" xNumber="1" yNumber="1" xSpacing="0" ySpacing="0" xExtent="0" yExtent="0"/>
+
+		<ZPositions name="ICPMS_03_20x_XY1.ome.mcs Z positions" description="Z focus positions for ICPMS_03_20x_XY1.ome.mcs" zType="ZStack" zRangeStart="0" zRangeEnd="37.5" numberOfPlanes="16"/>
+	
+		<Sites/>
+
+		<TimePoints>
+			<TimePoint name="Time Point 1" description="" timePointTime="2025-05-10T13:22:10Z" timePointPhase=""/>
+		</TimePoints>
+
+		<TimePhases/>
+
+		<ActiveRegion>
+			<SetSection dimType="Channels" sectionLocation="0" sectionExtent="1"/>
+			<SetSection dimType="ZPositions" sectionLocation="0" sectionExtent="16"/>
+			<SetSection dimType="ScanPositions" sectionLocation="0" sectionExtent="1"/>
+			<SetSection dimType="Sites" sectionLocation="0" sectionExtent="1"/>
+			<SetSection dimType="TimePoints" sectionLocation="0" sectionExtent="1"/>
+			<SetSection dimType="UserDefined1" sectionLocation="0" sectionExtent="1"/>
+			<SetSection dimType="UserDefined2" sectionLocation="0" sectionExtent="1"/>
+		</ActiveRegion>
+
+		<CurrentLocation>
+			<Location dimIndex="0" dimName="ZPositions" location="0"/>
+		</CurrentLocation>
+
+		<ImageData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="0"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="0" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="1"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="1" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="2"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="2" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="3"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="3" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="4"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="4" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="5"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="5" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="6"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="6" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="7"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="7" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="8"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="8" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="9"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="9" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="10"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="10" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="11"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="11" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="12"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="12" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="13"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="13" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="14"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="14" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+			<SourceData>
+				<Location dimIndex="0" dimName="ZPositions" location="15"/>
+				<FrameSource filePath="ICPMS_03_20x_XY1.ome\ICPMS_03_20x_XY1.ome_Z0-015.tif" fileFrame="15" xSize="1608" ySize="1608" dataType="1" interpretation="4" bitDepth="8"/>
+			</SourceData>
+		</ImageData>
+	</ImageSet>
+
+
+</ImageSets>

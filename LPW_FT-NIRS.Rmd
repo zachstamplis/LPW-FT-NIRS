@@ -354,7 +354,7 @@ scan_avg <- bind_cols(scan_avg, (scan_2[, 21:ncol(scan_2)] + scan_3[, 21:ncol(sc
 rm(scan_2, scan_3, scan_4, dfmeta_LPW)
 saveRDS(scan_avg, "RDS_dataframes/LPW_scan_avg_unproc.RDS")
 
-# preprocess
+# preprocess - AFTER TAKING AVERAGE (maybe incorrect here??)
 scan_avg_proc <- cbind(scan_avg[, c(1:20)], savitzkyGolay(scan_avg[, 21:length(scan_avg)], m = 1, p = 3, w = 17))
 saveRDS(scan_avg_proc, "RDS_dataframes/LPW_scan_avg_proc.RDS")
 
