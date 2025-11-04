@@ -156,7 +156,7 @@ library(ggrepel)
 library(dplyr)
 
 
-pca_data_with_na <- readRDS("RDS_dataframes/LPW_scan_avg_proc_UPDATED.RDS")
+pca_data_with_na <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 
 # --- 1. Prepare and Clean the Data (No Changes) ---
 # Assumes 'scan_avg_proc' is in your environment
@@ -172,137 +172,76 @@ spectral_data_cleaned <- spectral_data %>%
 # This step was successful for you
 pca_results <- pca(spectral_data_cleaned, scale = TRUE)
 
-# --- 3. Create Dataframe for Plotting [FINAL CORRECTION] ---
-# We now use the correct path to the scores matrix and column indices
+# --- 3. Create Dataframes (No Change) ---
+# This dataframe has ALL points (aged and unaged)
 scores_df <- data.frame(
-  PC1 = pca_results$calres$scores[, 1],  # First column of the scores
-  PC2 = pca_results$calres$scores[, 2],  # Second column of the scores
+  PC1 = pca_results$calres$scores[, 1],  
+  PC2 = pca_results$calres$scores[, 2],  
   specimen = metadata$specimen,
   read_age = metadata$read_age
 )
 
-# Use the correct path for explained variance
+# This dataframe has ONLY the aged points
+aged_data <- scores_df %>% filter(!is.na(read_age))
+
+# (Variance variables are the same)
 pc1_variance <- round(pca_results$calres$expvar[1], 1)
 pc2_variance <- round(pca_results$calres$expvar[2], 1)
 
 
-# --- 4. Generate the Plot (No Changes) ---
+# --- 4. Generate the Plot [REVISED] ---
 PCA_outliers <- ggplot(scores_df, aes(x = PC1, y = PC2)) +
+  
+  # Ellipse (using all points)
   stat_ellipse(
     type = "norm", level = 0.99, geom = "polygon",
-    alpha = 0.1, aes(fill = read_age)
+    alpha = 0.3, fill = "grey80" # Your darker fill
   ) +
-  geom_point(aes(color = read_age), size = 3, alpha = 0.8) +
-  geom_text_repel(aes(label = specimen), size = 3, max.overlaps = 15) +
-  scale_color_viridis(option = "D") +
-  scale_fill_viridis(option = "D") +
+  
+  # Points (all points)
+  geom_point(
+    # [FIX 1] Use 'read_age' as a numeric variable, NOT a factor
+    aes(color = read_age), 
+    size = 3, alpha = 0.8
+  ) +
+  
+  # Labels (aged points only)
+  geom_text_repel(
+    data = aged_data, 
+    aes(label = specimen), 
+    size = 3, max.overlaps = 15
+  ) +
+  
+  # [FIX 2] Use the default continuous scale.
+  # 'na.value' will still color the unaged points grey.
+  scale_color_viridis(option = "D", na.value = "grey50") +
+  
   labs(
     title = "PCA of Pre-processed Spectra for Outlier Detection",
-    subtitle = "Points are labeled by specimen ID and colored by age",
+    subtitle = "All specimens shown; aged specimens are labeled and colored",
     x = paste0("PC1 (", pc1_variance, "% variance explained)"),
     y = paste0("PC2 (", pc2_variance, "% variance explained)"),
-    color = "Age (days)",
-    fill = "Age (days)"
+    color = "Age (days)" # Legend title
   ) +
   theme_bw() +
-  guides(fill = "none")
+  guides(fill = "none") 
 
 PCA_outliers
-
 # --- Alternative: Save as a PNG file ---
 # PNG is also a great option, widely used and good quality.
 ggsave(
-  filename = paste0("Model Results/", "LPW", "_PCA_outliers_", timestamp, ".png"),
+  filename = paste0("Chapter 1/", "LPW", "_PCA_outliers_", timestamp, ".png"),
   plot = PCA_outliers,
   device = "png",
   width = 7,
   height = 6,
   dpi = 600
 )
-
-
-# average length = 
-
-# 53 was large, 177 mm
-# 77 also large, 182
-# 74 wasn't particularly large; 107,
-
-# --- 1. Define Outliers and Prepare Data ---
-# This assumes 'scan_avg_long' and 'scan_proc_long' are already in your environment.
-# 
-# # Define the specimen IDs for the outliers
-# outlier_specimens <- c(53, 77, 74)
-# 
-# # Split the RAW data into normal and outlier groups
-# scan_avg_long_normal <- scan_avg_long %>% filter(!specimen %in% outlier_specimens)
-# scan_avg_long_outliers <- scan_avg_long %>% filter(specimen %in% outlier_specimens)
-# 
-# # Split the PROCESSED data into normal and outlier groups
-# scan_proc_long_normal <- scan_proc_long %>% filter(!specimen %in% outlier_specimens)
-# scan_proc_long_outliers <- scan_proc_long %>% filter(specimen %in% outlier_specimens)
-# 
-# 
-# # --- 2. Create the Updated Plots ---
-# 
-# # Top Plot: Raw Averaged Spectra with Outliers in Black
-# p1 <- ggplot() +
-#   # Layer 1: Normal data, colored by age
-#   geom_line(data = scan_avg_long_normal,
-#             aes(x = wavenumber, y = absorbance, group = specimen, color = read_age),
-#             alpha = 0.6) +
-#   # Layer 2: Outlier data, thicker and black
-#   geom_line(data = scan_avg_long_outliers,
-#             aes(x = wavenumber, y = absorbance, group = specimen),
-#             color = "red",
-#             linewidth = 0.9) +
-#   scale_x_reverse() +
-#   scale_color_viridis() +
-#   labs(y = "Raw Absorbance", color = "Age (days)") +
-#   theme_bw(base_size = 15) +
-#   theme(
-#     axis.title.x = element_blank(),
-#     axis.text.x = element_blank(),
-#     axis.ticks.x = element_blank(),
-#     panel.grid.major = element_blank(),
-#     panel.grid.minor = element_blank(),
-#     legend.position = "none"
-#   )
-# 
-# # Bottom Plot: Pre-processed Spectra with Outliers in Black
-# p2 <- ggplot() +
-#   # Layer 1: Normal data, colored by age
-#   geom_line(data = scan_proc_long_normal,
-#             aes(x = wavenumber, y = absorbance, group = specimen, color = read_age),
-#             alpha = 0.6) +
-#   # Layer 2: Outlier data, thicker and black
-#   geom_line(data = scan_proc_long_outliers,
-#             aes(x = wavenumber, y = absorbance, group = specimen),
-#             color = "red",
-#             linewidth = 0.9) +
-#   scale_x_reverse() +
-#   scale_color_viridis() +
-#   labs(
-#     y = "Preprocessed Absorbance",
-#     x = expression(paste("Wavenumber (", cm^-1, ")")),
-#     color = "Age (days)"
-#   ) +
-#   theme_bw(base_size = 15) +
-#   theme(
-#     panel.grid.major = element_blank(),
-#     panel.grid.minor = element_blank()
-#   )
-# 
-# # --- 3. Combine and Display the Final Plot ---
-# (p1 / p2) + plot_layout(guides = 'collect')
-# 
-
-
-
-
+rm(pca_data_with_na)
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # Figure: AGE READ BIAS PLOTS ####
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
-df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_UPDATED.RDS")
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 df <- df[complete.cases(df$read_age), ]
 age_reads <- read_csv("metadata/ages_LPW.csv")
 
@@ -476,7 +415,7 @@ ggsave(
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 
 
-all_results_means <- readRDS("RDS_dataframes/LPW_SUMMARY_all_models_2025-10-29.RDS")
+all_results_means <- readRDS("Chapter 1/LPW_SUMMARY_all_models_2025-10-31.RDS")
 # Find the single best LM and GAM model from 'all_results_means'
 best_pca_models <- all_results_means %>%
   filter(ModelType %in% c("LM", "GAM")) %>% # filter for GAM and LM only
@@ -703,21 +642,21 @@ best_gam_method <- paste0("PCA-GAM", gam_comp)
 
 # Updated method order for consistency - ONLY FOUR METHODS
 final_method_order_importance <- c(
-  "PCA Loadings", # Generic name for both LM and GAM loadings
+  "PCA Loadings (LM)",
+  "PCA Loadings (GAM)",
   "VIP Score (PLS)",
   "Gain (XGB)",
   "Permutation (RF)"
 )
 
 
-final_importance_data <- readRDS("RDS_dataframes/LPW_IMPORTANCE_all_models_2025-10-29.RDS")
+final_importance_data <- readRDS("Chapter 1/LPW_IMPORTANCE_all_models_2025-10-31.RDS")
 
 importance_summary <- final_importance_data %>%
   mutate(
-    # Rename and consolidate the specific winning PCA models and the others
     method = case_when(
-      # Group both original PCA methods under the new generic name
-      method == best_lm_method | method == best_gam_method ~ "PCA Loadings",
+      method == best_lm_method  ~ "PCA Loadings (LM)",
+      method == best_gam_method ~ "PCA Loadings (GAM)",
       method == "PLS-VIP" ~ "VIP Score (PLS)",
       method == "XGBoost" ~ "Gain (XGB)",
       method == "Random Forest" ~ "Permutation (RF)",
@@ -860,7 +799,14 @@ ggsave(
 
 
 ## ALTERNATIVE: Overlay of spectra ####
-
+scan_proc_long <- df %>%
+  filter(!is.na(read_age)) %>%
+  pivot_longer(
+    cols = -c(1:20),
+    names_to = "wavenumber",
+    values_to = "absorbance"
+  ) %>%
+  mutate(wavenumber = as.numeric(wavenumber))
 specimen_48_proc_long <- scan_proc_long %>% filter(specimen == 48)
 # --- 0. Setup and Data (Assumptions) ---
 # Assuming 'specimen_48_proc_long' is filtered and ready (as per previous attempts).
@@ -1005,7 +951,7 @@ ggsave(
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # Figure: Age Predictions ####
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
-all_predictions <- readRDS("RDS_dataframes/LPW_PREDICTIONS_all_models_2025-10-29.RDS")
+all_predictions <- readRDS("Chapter 1/LPW_PREDICTIONS_all_models_2025-10-31.RDS")
 
 
 # Define the required constants (assuming they are correctly sourced from elsewhere)
@@ -1117,7 +1063,7 @@ ggsave(
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 
 
-
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 # --- Prepare data for K-S Test and ECDF Plot ---
 # (The first part of the data prep is unchanged)
 hatch_estimates <- all_predictions %>%
@@ -1426,243 +1372,7 @@ gtsave(table_to_export_full_bw, paste0("Model Results/", "LPW", "_results_all_bw
 gtsave(filtered_table_final_bw, paste0("Model Results/", "LPW", "_results_filtered_bw_", timestamp, ".html"))
 
 
-# OUTLIER INVESTIGATION ####
 
-
-# This is the most important part. You must be transparent about this process in your methods section.
-# 
-# Create a subsection called something like "Data Filtering and Outlier Removal." In this section, you should state clearly:
-#   
-#   "Prior to model calibration, the pre-processed spectral data was examined for statistical outliers using Principal Component Analysis (PCA). Several specimens (e.g., 53, 56, 74, 77, 118) were identified as lying outside the 95% confidence ellipse of the main data cluster (see Fig. X). While some of these specimens corresponded to the largest fish in the dataset, others did not, suggesting their spectral profiles were unique for reasons other than size alone. To create a more robust and representative calibration model, these outlying specimens were removed from the dataset prior to analysis."
-# 
-# This statement does three crucial things:
-#   
-#   It states what you did (removed specific specimens).
-# 
-# It justifies why you did it (they were statistical outliers identified by PCA).
-# 
-# It shows you've thought critically about the result (acknowledging the mixed relationship with fish size).
-
-
-
-
-
-# COMPARE OUTLIERS AND NOT
-# --- 1. Setup: Load Libraries and Data ---
-# Load necessary packages
-library(dplyr)
-library(mdatools)
-library(ggplot2)
-library(tidyr)
-library(caret) # Explicitly load for createFolds
-
-# Load your pre-processed data
-df_full <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
-
-# --- 2. Data Preparation (No Changes) ---
-
-df_with_outliers <- df_full %>%
-  filter(!is.na(read_age))
-
-specimens_to_remove <- c(53,74, 77)
-df_without_outliers <- df_full %>%
-  filter(!is.na(read_age)) %>%
-  filter(!specimen %in% specimens_to_remove)
-
-# --- 3. The Core Function: A SINGLE 10-Fold CV ---
-# This function is now simplified to be non-parallel.
-
-run_single_10_fold_cv <- function(dataset) {
-  
-  spectral_start_col <- 21
-  
-  cat("Processing dataset with", nrow(dataset), "samples...\n")
-  
-  # Create ONE set of 10 folds
-  set.seed(123) # Use a fixed seed for reproducibility
-  folds <- createFolds(dataset$read_age, k = 10, list = TRUE)
-  
-  # Store RMSE for each of the 10 folds
-  fold_results <- list()
-  
-  # Use a standard for loop
-  for (j in 1:10) {
-    cat("  - Processing fold", j, "of 10\n")
-    
-    test_indices <- folds[[j]]
-    calibrate_df <- dataset[-test_indices, ]
-    testing_df <- dataset[test_indices, ]
-    
-    train_spectra <- calibrate_df[, spectral_start_col:ncol(calibrate_df)]
-    train_spectra_cleaned <- train_spectra %>% select(where(~ !any(is.na(.))))
-    clean_colnames <- colnames(train_spectra_cleaned)
-    
-    mod_vip <- mdatools::pls(
-      train_spectra_cleaned, calibrate_df$read_age, cv = 1, scale = TRUE
-    )
-    
-    vip_scores <- vipscores(mod_vip)
-    cols_to_exclude <- vip_scores < 0.5
-    
-    mod_final <- mdatools::pls(
-      train_spectra_cleaned, calibrate_df$read_age, scale = TRUE, cv = 1,
-      x.test = testing_df[, clean_colnames], y.test = testing_df$read_age,
-      exclcols = cols_to_exclude
-    )
-    
-    ncomp <- mod_final$ncomp.selected
-    # Important: Check if ncomp is valid before trying to access results
-    if (length(ncomp) > 0 && !is.na(ncomp)) {
-      fold_results[[j]] <- data.frame(Fold = j, RMSE = mod_final$testres$rmse[ncomp])
-    } else {
-      # Handle cases where no component is selected (can happen in rare cases)
-      fold_results[[j]] <- data.frame(Fold = j, RMSE = NA)
-      cat("    ! Warning: No component selected in fold", j, "\n")
-    }
-  }
-  
-  # Combine results and return
-  return(bind_rows(fold_results))
-}
-
-
-# --- 4. Execution: Run the Simple Analysis ---
-
-results_with_outliers <- run_single_10_fold_cv(df_with_outliers)
-results_with_outliers$Group <- "Outliers Included"
-
-results_without_outliers <- run_single_10_fold_cv(df_without_outliers)
-results_without_outliers$Group <- "Outliers Excluded"
-
-
-# --- 5. Comparison and Summary ---
-
-comparison_results <- bind_rows(results_with_outliers, results_without_outliers)
-
-# Generate a boxplot for visual comparison of the 10 folds
-ggplot(comparison_results, aes(x = Group, y = RMSE, fill = Group)) +
-  geom_boxplot(alpha = 0.7) +
-  geom_jitter(width = 0.1, alpha = 0.5, height = 0) +
-  scale_fill_manual(values = c("Outliers Included" = "#EE6677", "Outliers Excluded" = "#4477AA")) +
-  labs(
-    title = "PLS Model Performance: Outlier Impact",
-    subtitle = "Results from a single 10-fold cross-validation",
-    x = "Dataset",
-    y = "RMSE (days)",
-    fill = "Group"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(legend.position = "none")
-
-# Print a summary table
-summary_table <- comparison_results %>%
-  group_by(Group) %>%
-  summarise(
-    Average_RMSE = mean(RMSE, na.rm = TRUE),
-    Std_Dev_RMSE = sd(RMSE, na.rm = TRUE)
-  )
-
-print(summary_table)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#### PCA INCLUDING UNAGED
-
-
-# Load necessary libraries
-library(mdatools)
-library(ggplot2)
-library(viridis)
-library(ggrepel)
-library(dplyr)
-
-# --- 1. Prepare and Clean ALL Spectral Data ---
-# Assumes 'scan_avg_proc' is in your environment.
-# KEY CHANGE: We are NOT filtering for read_age here.
-# We use the entire dataframe to run the PCA.
-all_pca_data <- scan_avg_proc
-
-# Separate metadata from the full spectral data
-all_metadata <- all_pca_data[, 1:20]
-all_spectral_data <- all_pca_data[, 21:ncol(all_pca_data)]
-
-# Clean NA columns from the Savitzky-Golay filter
-all_spectral_data_cleaned <- all_spectral_data %>%
-  select(where(~ !any(is.na(.))))
-
-# --- 2. Run PCA on the Full Dataset ---
-pca_results_all <- pca(all_spectral_data_cleaned, scale = TRUE)
-
-# --- 3. Create Dataframe for Plotting ---
-# This dataframe will include all 122 specimens.
-# The 'read_age' column will have NAs for un-aged fish.
-scores_df_all <- data.frame(
-  PC1 = pca_results_all$calres$scores[, 1],
-  PC2 = pca_results_all$calres$scores[, 2],
-  specimen = all_metadata$specimen,
-  read_age = all_metadata$read_age
-)
-
-# Create a separate dataframe JUST for the labels of aged fish
-labels_df <- scores_df_all %>%
-  filter(!is.na(read_age))
-
-# Extract variance explained
-pc1_variance_all <- round(pca_results_all$calres$expvar[1], 1)
-pc2_variance_all <- round(pca_results_all$calres$expvar[2], 1)
-
-
-# --- 4. Generate the Plot ---
-# This plot will show all points, but only label the aged ones.
-PCA_outliers_all_data <- ggplot(scores_df_all, aes(x = PC1, y = PC2)) +
-  # Draw a single 95% confidence ellipse around ALL data points
-  stat_ellipse(type = "norm", level = 0.95, geom = "polygon", alpha = 0.1, fill = "grey") +
-  
-  # Plot all points. Un-aged fish will be grey by default.
-  geom_point(aes(color = read_age), size = 3, alpha = 0.7) +
-  
-  # KEY CHANGE: Use the 'labels_df' to only add text for aged fish
-  geom_text_repel(data = labels_df, aes(label = specimen), size = 3.5, max.overlaps = 20) +
-  
-  # Use the viridis color scale (it handles NA values gracefully)
-  scale_color_viridis(option = "D", na.value = "grey50") +
-  
-  labs(
-    title = "PCA of All 122 Specimens for Outlier Detection",
-    subtitle = "Only aged specimens are labeled. Un-aged specimens are shown in grey.",
-    x = paste0("PC1 (", pc1_variance_all, "% variance explained)"),
-    y = paste0("PC2 (", pc2_variance_all, "% variance explained)"),
-    color = "Age (days)"
-  ) +
-  theme_bw(base_size = 14)
-
-# Display the plot
-PCA_outliers_all_data
-
-# --- 5. Save the Plot ---
-ggsave(
-  filename = "PCA_outliers_all_data.png",
-  plot = PCA_outliers_all_data,
-  device = "png",
-  width = 8,
-  height = 7,
-  dpi = 600
-)
-
-
-
+# PLS COMPONENTS USED:
+temp <- all_results_means %>% filter(Model == "PLS")
+range(temp$Min_Components)

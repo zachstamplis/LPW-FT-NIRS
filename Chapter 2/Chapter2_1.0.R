@@ -12,7 +12,7 @@ library(data.table)
 library(prospectr)
 library(tidyverse)
 library(viridis)
-
+library(readxl)
 
 IBM <- readRDS("RDS_dataframes/IBM_dfmeta_scan2_raw.RDS")
 LPW <- readRDS("RDS_dataframes/LPW_scan_avg_unproc.RDS")
@@ -39,7 +39,7 @@ IBM <- IBM %>%
   rename(sample_date = date_collected)
 IBM$hatch_date <- IBM$sample_date - IBM$read_age
 IBM <- IBM %>% select(specimen, region, length, weight, structure_weight, sample_date, hatch_date, read_age, everything())
-region_meta <- read_csv("IBM_region_specs.csv")
+region_meta <- read_xlsx("metadata/IBM_region_specs.xlsx")
 IBM <- IBM %>%
   inner_join(region_meta, by = "specimen") %>%
   select(-region.x, region = region.y) %>%
@@ -47,7 +47,9 @@ IBM <- IBM %>%
 rm(region_meta)
 
 df_combined_raw <- rbind(LPW, IBM)
+df_combined_raw <- temp
 
+temp <- df_combined_raw
 # saveRDS(df_combined_raw, "combined_IBM_LPW_raw.RDS")
 # rm(IBM, LPW)
 
@@ -557,8 +559,6 @@ library(plotly)
 
 
 
-# 1. Create a mock 'df_combined_raw' dataframe
-#    (Replace this with loading your actual data)
 df_combined_raw <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS")
 # filter for read_age using complete.cases()
 df_combined_raw <- df_combined_raw %>%

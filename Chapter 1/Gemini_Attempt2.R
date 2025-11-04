@@ -40,7 +40,7 @@ set.seed(6)
 cat("--- Loading and Preparing Data ---\n")
 
 # df <- readRDS("RDS_dataframes/IBM_SGpreproc.RDS")
-df <- readRDS("RDS_dataframes/LPW_scan_avg_proc_UPDATED.RDS")
+df <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
 
 # Define key column names
 RESPONSE_VAR    <- "read_age"
@@ -52,13 +52,9 @@ SPECTRAL_COLS   <- names(df)[grepl("^\\d", names(df))]
 df <- df[complete.cases(df[[RESPONSE_VAR]]), ]
 
 # --- E. Define Model Hyperparameters ---
-BEST_PARAMS_XGB <- readRDS("LPW_best_xgb_params_tuned_2025-10-29.RDS")
-BEST_PARAMS_RF <- readRDS("LPW_best_RF_params_tuned_2025-10-29.RDS")
+BEST_PARAMS_XGB <- readRDS("Chapter 1/LPW_best_xgb_params_tuned_2025-10-31.RDS")
+BEST_PARAMS_RF <- readRDS("Chapter 1/LPW_best_RF_params_tuned_2025-10-31.RDS")
 BEST_PARAMS_RF <- BEST_PARAMS_RF$bestTune
-
-# BEST_PARAMS_XGB <- data.frame(max_depth=6, eta=0.05, gamma=1, colsample_bytree=0.8, min_child_weight=8, subsample=1)
-# BEST_PARAMS_RF  <- data.frame(mtry=311, min.node.size=15, splitrule="variance")
-
 
 # --- 2. FUNCTION DEFINITIONS ---
 # =============================================================================
@@ -161,7 +157,11 @@ process_split_set <- function(current_split_id, job_manifest, all_data, ...) {
     dplyr::group_by(Model, ModelType, SplitSet) %>%
     dplyr::summarise(
       across(c(R2, RMSE, RPD, Bias, PercentRMSE), mean, na.rm = TRUE),
-      Components = first(Components), # Or mean(Components) if it can vary
+      # --- NEW: Calculate range and mean of components ---
+      Mean_Components = mean(Components, na.rm = TRUE),
+      Min_Components = min(Components, na.rm = TRUE),
+      Max_Components = max(Components, na.rm = TRUE),
+      # --- End new ---
       .groups = "drop"
     )
   
@@ -347,8 +347,13 @@ run_xgb_models_single <- function(calibrate, testing, fold_id, best_params_xgb) 
   y_test <- testing$read_age
   dtest <- xgb.DMatrix(data = x_test, label = y_test)
   
-  # 2. FIND OPTIMAL NROUNDS using internal CV on the calibration set
+  # 2. SET MODEL PARAMETERS using pre-tuned values
   # =================================================================
+  
+  # Get the stable, pre-calculated nrounds from your tuning script
+  # We round it just in case 'mean_nrounds' is not an integer
+  best_nrounds_for_fold <- round(best_params_xgb$mean_nrounds)
+  
   params <- list(
     objective = "reg:squarederror",
     booster = "gbtree",
@@ -361,19 +366,6 @@ run_xgb_models_single <- function(calibrate, testing, fold_id, best_params_xgb) 
     nthread = 1
   )
   
-  # Use xgb.cv to find the best number of rounds for this specific training fold
-  xgb_cv_model <- xgb.cv(
-    params = params,
-    data = dtrain_full,
-    nrounds = 1000,
-    nfold = 5,
-    early_stopping_rounds = 20,
-    metrics = "rmse",
-    verbose = 0
-  )
-  
-  # Get the best number of rounds from the internal CV
-  best_nrounds_for_fold <- xgb_cv_model$best_iteration
   
   # 3. TRAIN FINAL MODEL on the full calibration set
   # =================================================================
@@ -622,77 +614,69 @@ if (RUN_PCA_MODELS) {
 
 
 
-#### UNCOMMENT TO SAVE PC'S USED
-# # Direct access to the 'formula' element for all GAM models
-# gam_formulas_direct <- lapply(top10_gam_models, `[[`, "formula") 
-# 
-# # Display the formula for the first model as an example
-# gam_formulas_direct$`314`
-# 
-# 
-# 
-# 
-# # 1. Get the formulas (from the previous step)
-# gam_formulas <- lapply(top10_gam_models, formula)
-# 
-# # 2. Extract and format the predictor names for each model
-# gam_predictors_list <- lapply(names(gam_formulas), function(model_id) {
-#   # Get the terms object from the formula
-#   model_terms <- terms(gam_formulas[[model_id]])
-#   
-#   # Get all predictor names (excluding the response)
-#   predictors <- attr(model_terms, "term.labels")
-#   
-#   # Handle GAM smooth terms (e.g., convert "s(PC1)" to "PC1")
-#   # This pattern matches any text inside s(...)
-#   cleaned_predictors <- gsub("^s\\((.*)\\)$", "\\1", predictors) 
-#   
-#   # Create a row for the data frame
-#   data.frame(
-#     Model_ID = model_id,
-#     Predictors = paste(cleaned_predictors, collapse = ", ") # Combine all into a single string
-#   )
-# })
-# 
-# # 3. Combine the list of data frames into a single table
-# gam_predictors_table <- do.call(rbind, gam_predictors_list)
-# 
-# # Print the resulting table
-# print("Top 10 GAM Models Predictor Table:")
-# print(gam_predictors_table)
-# 
-# 
-# # 1. Get the formulas (from the previous step)
-# lm_formulas <- lapply(top10_lm_models, formula)
-# 
-# # 2. Extract and format the predictor names for each model
-# lm_predictors_list <- lapply(names(lm_formulas), function(model_id) {
-#   # Get the terms object from the formula
-#   model_terms <- terms(lm_formulas[[model_id]])
-#   
-#   # Get all predictor names (excluding the response)
-#   predictors <- attr(model_terms, "term.labels")
-#   
-#   # Create a row for the data frame
-#   data.frame(
-#     Model_ID = model_id,
-#     Predictors = paste(predictors, collapse = ", ") # Combine all into a single string
-#   )
-# })
-# 
-# # 3. Combine the list of data frames into a single table
-# lm_predictors_table <- do.call(rbind, lm_predictors_list)
-# 
-# # Print the resulting table
-# print("Top 10 LM Models Predictor Table:")
-# print(lm_predictors_table)
-# 
-# 
-# saveRDS(gam_predictors_table, "LPW_GAM_PCsused.RDS")
-# saveRDS(lm_predictors_table, "LPW_LM_PCsused.RDS")
+### UNCOMMENT TO SAVE PC'S USED
+# Direct access to the 'formula' element for all GAM models
+gam_formulas_direct <- lapply(top10_gam_models, `[[`, "formula")
+# 1. Get the formulas (from the previous step)
+gam_formulas <- lapply(top10_gam_models, formula)
+# 2. Extract and format the predictor names for each model
+gam_predictors_list <- lapply(names(gam_formulas), function(model_id) {
+  # Get the terms object from the formula
+  model_terms <- terms(gam_formulas[[model_id]])
+  
+  # Get all predictor names (e.g., "s(PC1, k = 4)")
+  predictors <- attr(model_terms, "term.labels")
+  
+  # Extract just the "PC1", "PC3", etc.
+  pc_parts <- stringr::str_extract(predictors, "PC\\d+")
+  
+  # Extract just the numbers "1", "3", etc.
+  pc_numbers <- gsub("PC", "", pc_parts)
+  
+  # Create a row for the data frame
+  data.frame(
+    Model_ID = model_id,
+    Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
+  )
+})
+# 3. Combine the list of data frames into a single table
+gam_predictors_table <- do.call(rbind, gam_predictors_list)
+# Print the resulting table
+print("Top 10 GAM Models Predictor Table:")
+print(gam_predictors_table)
 
 
+# 1. Get the formulas (from the previous step)
+lm_formulas <- lapply(top10_lm_models, formula)
 
+# 2. Extract and format the predictor names for each model
+lm_predictors_list <- lapply(names(lm_formulas), function(model_id) {
+  # Get the terms object from the formula
+  model_terms <- terms(lm_formulas[[model_id]])
+  
+  # Get all predictor names (e.g., "PC1", "PC3")
+  predictors <- attr(model_terms, "term.labels")
+  
+  # Extract just the numbers "1", "3", etc.
+  pc_numbers <- gsub("PC", "", predictors)
+  
+  # Create a row for the data frame
+  data.frame(
+    Model_ID = model_id,
+    Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
+  )
+})
+
+# 3. Combine the list of data frames into a single table
+lm_predictors_table <- do.call(rbind, lm_predictors_list)
+
+# Print the resulting table
+print("Top 10 LM Models Predictor Table:")
+print(lm_predictors_table)
+
+timestamp <- format(Sys.Date(), "%Y-%m-%d")
+saveRDS(gam_predictors_table, paste0("Chapter 1/", "LPW_", "GAM_PCsused_", timestamp, ".RDS"))
+saveRDS(lm_predictors_table,  paste0("Chapter 1/", "LPW_", "LM_PCsused_", timestamp, ".RDS"))
 
 
 
@@ -739,10 +723,10 @@ if (RUN_PLS_MODELS) {
 }
 Sys.time()
 timestamp <- format(Sys.Date(), "%Y-%m-%d")
-saveRDS(job_manifest, paste0("Model Results/", "job_manifest_", "LPW_", timestamp, ".RDS"))
+saveRDS(job_manifest, paste0("Chapter 1/", "job_manifest_", "LPW_", timestamp, ".RDS"))
 
 # 42 minutes to run with 57 specimens.....
-
+# 32 mins run again....???? Oh I changed no recalculating nrounds of boosting
 
 # --- 4. MAIN ANALYSIS: RUN ALL MODELS IN PARALLEL ---
 # =============================================================================
@@ -796,7 +780,7 @@ if (RUN_SIMPLE_MODELS) {
   cat("\n--- Running Simple Models Analysis ---\n")
   
   # --- A. Prepare Data and Splits for Simple Models ---
-  df_simple <- readRDS("RDS_dataframes/LPW_scan_avg_proc_UPDATED.RDS")
+  df_simple <- readRDS("RDS_dataframes/LPW_scan_avg_proc.RDS")
   df_simple <- df_simple[complete.cases(df_simple$read_age), ]
   df_simple <- df_simple[complete.cases(df_simple$structure_weight), ]
   set.seed(6)
@@ -899,9 +883,9 @@ if (RUN_SIMPLE_MODELS) {
 cat("\n--- Saving All Final Results ---\n")
 
 timestamp <- format(Sys.Date(), "%Y-%m-%d")
-saveRDS(final_results_summary, paste0("RDS_dataframes/", "LPW", "_SUMMARY_all_models_", timestamp, ".RDS"))
-saveRDS(final_predictions_df, paste0("RDS_dataframes/", "LPW", "_PREDICTIONS_all_models_", timestamp, ".RDS"))
-saveRDS(final_importance_summary, paste0("RDS_dataframes/", "LPW", "_IMPORTANCE_all_models_", timestamp, ".RDS"))
+saveRDS(final_results_summary, paste0("Chapter 1/", "LPW", "_SUMMARY_all_models_", timestamp, ".RDS"))
+saveRDS(final_predictions_df, paste0("Chapter 1/", "LPW", "_PREDICTIONS_all_models_", timestamp, ".RDS"))
+saveRDS(final_importance_summary, paste0("Chapter 1/", "LPW", "_IMPORTANCE_all_models_", timestamp, ".RDS"))
 
 cat("✅ All results saved.\n")
 cat("\n--- Script finished successfully! ---\n")
