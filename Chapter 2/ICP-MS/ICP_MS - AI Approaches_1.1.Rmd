@@ -1,0 +1,2007 @@
+# Load packages
+Install and load necessary packages
+```{r}
+packages <- c("tidyverse")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages) > 0) {
+  install.packages(new_packages)
+}
+invisible(lapply(packages, library, character.only = TRUE))
+rm(packages, new_packages)
+```
+
+
+# Data Import
+Read and prepare initial dataframe for otolith elemental analysis from saved RDS file
+
+```{r}
+# Load ICP-MS data from RDS file
+df <- readRDS("RDS_dataframes/ICP-MS_clean.RDS") # I think this is just the raw data without any filtering yet
+# Select only otolith specimens (rows 30-184)
+df <- df[c(30:184)]
+```
+
+### create single dataframe (remove lists)
+```{r}
+# no specimen 14
+# specimen 24 missing a third transect
+for(i in 1:155){
+  spec <- names(df[i])
+  df[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+  rm(spec,i)
+}
+df <- do.call("rbind", df)
+df <- rename(df, "time" = `Elapsed Time`)
+# saveRDS(df, "RDS_dataframes/ICP-MS_df.RDS")
+# rm(df)
+```
+
+### filter out the junk first
+```{r}
+# unusable = missed core
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+# bad = nearly missed our basically outside core
+bad <- paste0("oto", c(16, 18, 20, 28, 35))
+# good = good enough, close to or thru core
+good <- as.character(unique(df$specimen))
+good <- good[!good %in% c(unusable, bad)]
+```
+
+
+# Best Approach
+
+
+
+### find_otolith_boundaries()
+Detect Otolith Boundaries using Ca43 and Cu65 signals
+ca43_data: Numeric vector of Ca43 measurements
+cu65_data: Numeric vector of Cu65 measurements
+window_size:  Size of moving average window (default: 7)
+```{r}
+find_otolith_boundaries <- function(ca43_data, cu65_data, window_size = 7) {
+  # Data preparation
+  n_points <- length(ca43_data)
+  # Calculate rolling medians with larger window for stability
+  ma_ca43 <- stats::runmed(ca43_data, k = window_size)
+  ma_cu65 <- stats::runmed(cu65_data, k = window_size)
+  # Calculate percentiles using middle portion of data for better baseline
+  mid_start <- ceiling(n_points * 0.3)
+  mid_end <- floor(n_points * 0.7)
+  mid_data_ca43 <- ma_ca43[mid_start:mid_end]
+  
+  # Get reference levels
+  # ‼️ Added na.rm = TRUE, just in case
+  ca43_median <- median(mid_data_ca43, na.rm = TRUE) 
+  ca43_start_threshold <- ca43_median * 0.4  # More lenient threshold
+  
+  # Start detection with minimum signal requirements
+  min_stable_points <- 5
+  start_idx <- NULL
+  
+  # Look for sustained rise in Ca43
+  for(i in window_size:(n_points-min_stable_points)) {
+    window <- ma_ca43[i:(i+min_stable_points)]
+    # ‼️ Added na.rm = TRUE
+    if(all(window > ca43_start_threshold, na.rm = TRUE) &&  
+       mean(window, na.rm = TRUE) > mean(ma_ca43[(i-window_size):i], na.rm = TRUE)) {
+      start_idx <- i
+      break
+    }
+  }
+  
+  # Fallback if no clear start found
+  if(is.null(start_idx)) {
+    # Use first major rise in Ca43
+    for(i in 2:n_points) {
+      if(ma_ca43[i] > ca43_start_threshold && 
+         ma_ca43[i] > mean(ma_ca43[max(1, i-5):i], na.rm = TRUE) * 1.5) {
+        start_idx <- i
+        break
+      }
+    }
+  }
+  
+  # If still no start found, use conservative approach
+  if(is.null(start_idx)) {
+    start_idx <- ceiling(n_points * 0.1)  # Use first 10% as default
+  }
+
+  # --- ‼️ REVISED END DETECTION LOGIC ---
+  
+  # Default to the end of the file
+  end_idx <- n_points 
+  
+  # Only look for end if we have enough points
+  if(n_points - start_idx > window_size * 3) {
+    
+    # Start our search from the middle (where we know signal is good)
+    # and search *forwards* to the end.
+    search_start_for_end <- mid_start
+    
+    # Loop from the middle to the end
+    for(i in search_start_for_end:(n_points - min_stable_points)) {
+      
+      # Get a small window of points
+      window <- ma_ca43[i:(i + min_stable_points - 1)]
+      
+      # Check if *all* points in this window have dropped below the threshold
+      # (Using the same threshold as the start)
+      if(all(window < ca43_start_threshold, na.rm = TRUE)) {
+        end_idx <- i  # This is the first point of the drop
+        break        # We found it, so stop searching
+      }
+    }
+  }
+  
+  # --- END REVISED LOGIC ---
+
+  # Validate and adjust boundaries
+  if(end_idx - start_idx < 100) {  # Minimum reasonable length
+    end_idx <- n_points
+    start_idx <- min(start_idx, ceiling(n_points * 0.15))  # Max 15% from start
+  }
+  
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    filtered_data = ca43_data[start_idx:end_idx],
+    diagnostics = list(
+      ca43_median = ca43_median,
+      start_threshold = ca43_start_threshold
+    )
+  ))
+}
+
+```
+
+
+```{r}
+#' Find Otolith Boundaries using Cu65 "Bowl"
+#'
+#' Detects otolith boundaries using the inverse hyperbolic sine (asinh)
+#' transformed Cu65 signal, which typically forms a "bowl" shape.
+#'
+#' @param ca43_data (Unused, for compatibility with process_otoliths)
+#' @param cu65_data Numeric vector of Cu65 measurements
+#' @param window_size Size of moving average window (default: 7)
+#' @param threshold_offset How far above the baseline to set the threshold
+#'                         (on asinh scale). Tunable.
+#' @param buffer How many points to include on the slope (default: 5)
+#'
+find_otolith_boundaries_cu <- function(ca43_data, cu65_data, 
+                                     window_size = 7, 
+                                     threshold_offset = 3.0, 
+                                     buffer = 2) {
+  
+  # --- 1. Preparation ---
+  n_points <- length(cu65_data)
+  min_stable_points <- 5
+  
+  # Apply asinh transform and smoothing (same as in plots)
+  # Using asinh() because it handles 0 and negative values
+  ma_cu <- asinh(stats::runmed(cu65_data, k = window_size))
+
+  # --- 2. Find Baseline & Threshold ---
+  # Find the "bottom of the bowl" baseline
+  mid_start <- ceiling(n_points * 0.3)
+  mid_end <- floor(n_points * 0.7)
+  cu_baseline <- median(ma_cu[mid_start:mid_end], na.rm = TRUE)
+  
+  # Set the threshold slightly *above* the bottom of the bowl
+  cu_threshold <- cu_baseline + threshold_offset 
+  
+  # --- 3. Start Detection (Find the drop) ---
+  start_idx <- NULL
+  # Search from the beginning for the first stable *low* period
+  for(i in window_size:(mid_end)) {
+    window <- ma_cu[i:(i + min_stable_points - 1)]
+    
+    # if all points in the window are *below* the threshold...
+    if(all(window < cu_threshold, na.rm = TRUE)) {
+      # ...we found the start of the bowl bottom.
+      # Back up by 'buffer' to capture the slope.
+      start_idx <- max(1, i - buffer) 
+      break
+    }
+  }
+  
+  # Fallback if no clear start found
+  if(is.null(start_idx)) {
+    start_idx <- ceiling(n_points * 0.1) # Conservative default
+  }
+
+  # --- 4. End Detection (Find the rise) ---
+  end_idx <- n_points # Default to end
+  # Search from the middle for the first *rise*
+  for(i in mid_start:(n_points - min_stable_points)) {
+    
+    # Check a single point (more responsive to the *start* of the rise)
+    if(is.na(ma_cu[i])) next # Skip NAs
+    
+    if(ma_cu[i] > cu_threshold) {
+      # We found the start of the rise.
+      # Go *forward* by 'buffer' to capture the slope.
+      end_idx <- min(n_points, i + buffer) 
+      break
+    }
+  }
+
+  # --- 5. Validate and Return ---
+  if(end_idx - start_idx < 100) { # Minimum reasonable length
+    start_idx <- max(1, start_idx - buffer*2) # Be more generous if it's too short
+    end_idx <- min(n_points, end_idx + buffer*2)
+  }
+  
+  # Final safety check
+  if (end_idx <= start_idx) {
+      start_idx <- ceiling(n_points * 0.1)
+      end_idx <- n_points
+  }
+
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    # Note: filtered_data is now irrelevant as we're just finding indices
+    filtered_data = ca43_data[start_idx:end_idx], 
+    diagnostics = list(
+      cu_baseline = cu_baseline,
+      cu_threshold = cu_threshold
+    )
+  ))
+}
+```
+
+
+
+### process_otoliths()
+Process all otolith transects
+```{r}
+#'  otolith_list List of dataframes containing Ca43 and Cu65_ppm measurements
+#'  Summary dataframe of processing results
+process_otoliths <- function(otolith_list) {
+  results <- list()
+  failed_specimens <- character()
+  
+  for(name in names(otolith_list)) {
+    tryCatch({
+      bounds <- find_otolith_boundaries_cu(
+        otolith_list[[name]]$Ca43,
+        otolith_list[[name]]$Cu65_ppm
+      )
+      results[[name]] <- bounds
+      cat("Processed", name, 
+          "- Start:", bounds$start, 
+          "End:", bounds$end, "\n")
+    }, error = function(e) {
+      cat("Error processing", name, ":", e$message, "\n")
+      failed_specimens <- c(failed_specimens, name)
+    })
+  }
+  summary_df <- data.frame(
+    transect = names(results),
+    start_index = sapply(results, `[[`, "start"),
+    end_index = sapply(results, `[[`, "end"),
+    original_length = sapply(otolith_list[names(results)], nrow),
+    filtered_length = sapply(results, function(x) length(x$filtered_data))
+  )
+  summary_df$points_removed <- summary_df$original_length - summary_df$filtered_length
+  attr(summary_df, "failed_specimens") <- failed_specimens
+  return(summary_df)
+}
+```
+
+#### outlier from analysis (this is not current as of right now, 11/04/2025)
+```{r}
+# # Documentation for anomalous specimen oto10-2
+# ANOMALY_NOTE <- list(
+#   specimen_id = "oto10-2",
+#   issue = "Mid-transect elemental data disruption",
+#   details = list(
+#     observation = "All elemental data show aberrant values in middle section",
+#     impact = "Creates artificial truncation in data processing",
+#     location = "Around point 288 in transect",
+#     comparison = "Other oto10 series (0,1,3) show normal patterns"
+#   ),
+#   recommendation = "Should be flagged for separate analysis or potential exclusion from bulk processing"
+# )
+
+```
+
+### Filter DF
+
+```{r}
+# remove the junk first
+df_filtered <- df %>% filter(specimen %in% good)
+
+
+# ‼️ FIX 1: Split the dataframe back into a list
+# Your process_otoliths() function expects a *list* of dataframes,
+# not one single big dataframe. We'll split the big df by each
+# unique combination of specimen and transect.
+df_list <- df_filtered %>%
+  group_split(specimen, transect)
+
+# ‼️ FIX 2: Name the list
+# The function also expects a *named* list to identify the transects.
+# We'll create names by pasting the specimen and transect IDs together
+# (e.g., "oto01-1", "oto01-2", etc.)
+list_names <- purrr::map_chr(df_list, function(transect_df) {
+  # Get the first (and only) specimen/transect value from this df
+  spec <- as.character(transect_df$specimen[1])
+  tran <- as.character(transect_df$transect[1])
+  paste(spec, tran, sep = "-")
+})
+
+# Apply the new names to the list
+names(df_list) <- list_names
+```
+
+
+
+
+
+```{r}
+# ---
+# Now, pass the correctly formatted *list* to your function
+# ---
+results <- process_otoliths(df_list)
+
+# You can now view the summary dataframe
+print(results)
+```
+
+
+# generate plots of all transects, excluding the filtered junk
+```{r}
+library(tidyr)
+# 1. Add a row-number index *within each transect* to df_filtered
+df_with_index <- df_filtered %>%
+  group_by(specimen, transect) %>%
+  mutate(index = row_number()) %>%
+  ungroup()
+
+# 2. Split the 'results' df to make its columns match df_filtered
+results_split <- results %>%
+  # Split "oto01-1" into "oto01" and "1"
+  tidyr::separate(transect, into = c("specimen_char", "transect_char"), sep = "-", remove = FALSE) %>%
+  # Convert new columns to factors to match the types in df_filtered
+  mutate(
+    specimen = factor(specimen_char),
+    transect = factor(transect_char)
+  ) %>%
+  select(specimen, transect, start_index, end_index)
+
+# 3. Find the 'time' value for the start_index
+start_times <- df_with_index %>%
+  # Join where specimen, transect, and index match
+  inner_join(results_split, by = c("specimen", "transect", "index" = "start_index")) %>%
+  select(specimen, transect, start_time = time)
+
+# 4. Find the 'time' value for the end_index
+end_times <- df_with_index %>%
+  inner_join(results_split, by = c("specimen", "transect", "index" = "end_index")) %>%
+  select(specimen, transect, end_time = time)
+
+# 5. Join start and end times into one cutoff dataframe
+cutoff_data <- start_times %>%
+  inner_join(end_times, by = c("specimen", "transect"))
+
+# 6. Pivot to a "long" format, which ggplot prefers for plotting
+cutoff_data_long <- cutoff_data %>%
+  tidyr::pivot_longer(
+    cols = c(start_time, end_time),
+    names_to = "cutoff_type",
+    values_to = "time_value"
+  )
+
+cat("Cutoff time lookup table created successfully.\n")
+
+# Make sure all necessary packages are loaded
+library(ggplot2)
+library(dplyr)
+library(tidyr) # We need this for pivot_longer
+
+# --- 1. Data Preparation ---
+# (Assumes you've already run the code to create 'df_filtered' and 'cutoff_data_long')
+
+# ‼️ NEW: Pivot the main data to a "long" format
+# This is so we can facet by element (Ca43 vs Cu65_ppm)
+df_long <- df_filtered %>%
+  # Select just the columns we need for plotting
+  select(specimen, transect, time, Ca43, Cu65_ppm) %>%
+  pivot_longer(
+    cols = c(Ca43, Cu65_ppm), # Pivot these two columns
+    names_to = "element",    #...into a new column named "element"
+    values_to = "value"      #...and their values into a new column named "value"
+  )
+
+cat("Pivoted data to long format for plotting.\n")
+
+
+# 2. ‼️ NEW: Apply transformation
+#    We will apply the asinh() transform to Cu65_ppm values
+#    and update the 'element' label to show this in the plot.
+df_long_transformed <- df_long %>%
+  mutate(
+    # Apply asinh (pseudo-log) transformation ONLY to Cu65_ppm values
+    value = ifelse(element == "Cu65_ppm", asinh(value), value),
+    
+    # Rename the 'element' factor to reflect the transformation in the plot label
+    element = factor(element, 
+                     levels = c("Ca43", "Cu65_ppm"), 
+                     labels = c("Ca43", "Cu65_ppm (asinh)"))
+  )
+
+cat("Applied asinh() transformation to Cu65_ppm data.\n")
+
+
+# --- 2. PDF Generation Loop ---
+
+pdf_output_file <- "Ca43_Cu65_transect_plots_LOG_SCALES_thresh2_buffer2.pdf"
+specimen_list <- unique(df_filtered$specimen)
+
+# Set a wider page width
+pdf(pdf_output_file, width = 11, height = 8.5) # Landscape
+
+for (spec_id in specimen_list) {
+  
+  # Filter the *transformed* data
+  spec_data_transformed <- df_long_transformed %>% 
+    filter(specimen == spec_id)
+  
+  # Filter the cutoff data (this is the same as before)
+  spec_cutoffs <- cutoff_data_long %>%
+    filter(specimen == spec_id)
+  
+  # Create the plot
+  p <- ggplot(spec_data_transformed, aes(x = time, y = value)) +
+    
+    # Draw the line, colored by the (new) element factor
+    geom_line(aes(color = element), linewidth = 0.7) +
+    
+    # Add vertical lines (same as before)
+    geom_vline(
+      data = spec_cutoffs,
+      aes(xintercept = time_value),
+      color = "red",
+      linetype = "dashed",
+      linewidth = 0.7
+    ) +
+    
+    # Use facet_wrap (same as before)
+    facet_wrap(transect ~ element, scales = "free", ncol = 2) +
+    
+    # ‼️ UPDATED: Use the new factor label in the color scale
+    scale_color_manual(values = c("Ca43" = "#0060A0", "Cu65_ppm (asinh)" = "#D55E00")) +
+    
+    labs(
+      title = paste("Specimen:", spec_id),
+      # ‼️ UPDATED: New subtitle
+      subtitle = "Ca43 (raw) and Cu65 (asinh-transformed) Signals with Boundaries",
+      x = "Time (Elapsed)",
+      y = "Signal Value / asinh(Value)"
+    ) +
+    theme_bw() +
+    theme(
+      strip.text = element_text(size = 10, face = "bold"),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5),
+      legend.position = "none"
+    )
+  
+  print(p)
+  cat("Plotted specimen:", as.character(spec_id), "\n")
+}
+
+dev.off()
+
+cat("\nDone! Successfully created PDF:", pdf_output_file, "\n")
+
+```
+
+
+```{r}
+# # Process all specimens
+# results <- process_otoliths(df)
+# # Create filtered version of original dataset
+# filtered_df <- lapply(names(df), function(specimen) {
+#   # Get boundaries for this specimen
+#   bounds <- results[results$transect == specimen, ]
+#   
+#   # Skip if specimen is the documented anomaly
+#   if(specimen == "oto10-2") {
+#     warning(paste("Skipping known anomalous specimen:", specimen))
+#     return(NULL)
+#   }
+#   
+#   # Extract relevant portion of data
+#   df[[specimen]][bounds$start_index:bounds$end_index, ]
+# })
+# # Name the list elements
+# names(filtered_df) <- names(df)
+# # Remove NULL entries (anomalous specimens)
+# filtered_df <- filtered_df[!sapply(filtered_df, is.null)]
+# # saveRDS(filtered_df, "RDS_dataframes/ICP-MS_cutoffs_df.RDS")
+```
+
+### Validation checks
+```{r validation}
+# # Check filtered dataset
+# cat("Original specimens:", length(df), "\n")
+# cat("Filtered specimens:", length(filtered_df), "\n")
+# cat("Removed specimens:", setdiff(names(df), names(filtered_df)), "\n")
+# 
+# # Check lengths match results
+# all_match <- all(sapply(names(filtered_df), function(specimen) {
+#   nrow(filtered_df[[specimen]]) == 
+#     results$filtered_length[results$transect == specimen]
+# }))
+# cat("All lengths match results:", all_match, "\n")
+```
+
+
+# shiny for marking ends; shows both Ca and Cu, filtering unusable specimens, showing only best 2 transects from each
+
+```{r}
+# --- 0. Load Packages ---
+# Install if needed
+# install.packages(c("shiny", "tidyverse", "readr", "ggplot2", "purrr"))
+library(shiny)
+library(ggplot2)
+library(tidyverse)
+library(readr)
+library(purrr)
+library(readxl)
+
+# --- 1. Load Raw ICP-MS Data ---
+cat("Loading raw ICP-MS data...\n")
+df_raw <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df_raw <- df_raw[c(30:184)] # Select otoliths
+
+# Bind all transects into one dataframe
+df_list_raw <- list()
+for(i in 1:length(df_raw)){
+  spec <- names(df_raw[i])
+  df_list_raw[[i]] <- df_raw[[i]]
+  df_list_raw[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df_list_raw[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+}
+df <- do.call("rbind", df_list_raw)
+df <- rename(df, "time" = `Elapsed Time`)
+
+# --- 2. Load Transect Grades & Filter ---
+cat("Loading transect grades...\n")
+grades_file <- "transect grades.xlsx"
+if (!file.exists(grades_file)) {
+  stop(paste("Error:", grades_file, "not found. Please upload it."))
+}
+
+grades_wide <- read_xlsx(grades_file)
+
+# Convert grades to long format
+grades_long <- grades_wide %>%
+  rename(specimen_num = `Specimen Number`) %>%
+  pivot_longer(
+    cols = starts_with("Transect"),
+    names_to = "transect_name",
+    values_to = "grade"
+  ) %>%
+  # Filter out transects that weren't graded (NA)
+  filter(!is.na(grade)) %>%
+  mutate(
+    # Format specimen name to match ICP-MS data (e.g., 1 -> oto01)
+    specimen = sprintf("oto%02d", specimen_num),
+    # Format transect name to match (e.g., "Transect 1" -> "1")
+    transect = str_extract(transect_name, "\\d+"),
+  ) %>%
+  select(specimen, transect, grade)
+
+# Get the "Top 2" transects for each specimen
+top_2_transects <- grades_long %>%
+  group_by(specimen) %>%
+  # Keep only the 2 transects with the lowest grade
+  slice_min(order_by = grade, n = 2, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    # Convert to factor to match 'df' for joining
+    specimen = as.factor(specimen),
+    transect = as.factor(transect)
+  )
+
+cat("Successfully identified Top 2 transects per specimen.\n")
+
+# --- 3. Filter Main Data ---
+# Define "unusable" (red) list.
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+
+# 1. Remove unusable specimens
+df_semi_filtered <- df %>%
+  filter(!specimen %in% unusable)
+
+# 2. Keep ONLY the top 2 transects
+# This correctly INCLUDES the "bad" (yellow) list specimens
+df_to_process <- df_semi_filtered %>%
+  inner_join(top_2_transects, by = c("specimen", "transect"))
+
+cat("Main dataframe filtered. Ready for pre-processing.\n")
+
+# --- 4. Automated Pre-Filter (Functions) ---
+
+# Copy of the Cu-bowl finder function
+find_otolith_boundaries_cu <- function(ca43_data, cu65_data, 
+                                       window_size = 7, 
+                                       threshold_offset = 1.0, # Using 1.0 as you found it worked better
+                                       buffer = 3) { # Using a smaller buffer
+  
+  n_points <- length(cu65_data)
+  min_stable_points <- 5
+  ma_cu <- asinh(stats::runmed(cu65_data, k = window_size))
+  
+  mid_start <- ceiling(n_points * 0.3)
+  mid_end <- floor(n_points * 0.7)
+  cu_baseline <- median(ma_cu[mid_start:mid_end], na.rm = TRUE)
+  cu_threshold <- cu_baseline + threshold_offset 
+  
+  start_idx <- NULL
+  for(i in window_size:(mid_end)) {
+    window <- ma_cu[i:(i + min_stable_points - 1)]
+    if(all(window < cu_threshold, na.rm = TRUE)) {
+      start_idx <- max(1, i - buffer) 
+      break
+    }
+  }
+  if(is.null(start_idx)) { start_idx <- ceiling(n_points * 0.1) }
+  
+  end_idx <- n_points 
+  for(i in mid_start:(n_points - min_stable_points)) {
+    if(is.na(ma_cu[i])) next 
+    if(ma_cu[i] > cu_threshold) {
+      end_idx <- min(n_points, i + buffer) 
+      break
+    }
+  }
+  
+  if (end_idx <= start_idx) {
+    start_idx <- ceiling(n_points * 0.1)
+    end_idx <- n_points
+  }
+  
+  return(list(
+    start = start_idx,
+    end = end_idx,
+    filtered_data = ca43_data[start_idx:end_idx], 
+    diagnostics = list(cu_baseline = cu_baseline, cu_threshold = cu_threshold)
+  ))
+}
+
+# Copy of the processing function
+process_otoliths <- function(otolith_list) {
+  results <- list()
+  for(name in names(otolith_list)) {
+    tryCatch({
+      bounds <- find_otolith_boundaries_cu(
+        otolith_list[[name]]$Ca43,
+        otolith_list[[name]]$Cu65_ppm
+      )
+      results[[name]] <- bounds
+    }, error = function(e) {
+      cat("Error processing", name, ":", e$message, "\n")
+    })
+  }
+  
+  summary_df <- data.frame(
+    transect = names(results),
+    start_index = sapply(results, `[[`, "start"),
+    end_index = sapply(results, `[[`, "end")
+  )
+  return(summary_df)
+}
+
+# --- 5. Run Pre-Filter & Prepare for App ---
+cat("Running automated pre-filter...\n")
+
+# Split the dataframe into a list
+df_list_to_process <- df_to_process %>%
+  group_split(specimen, transect)
+
+# Create names for the list
+list_names <- purrr::map_chr(df_list_to_process, function(transect_df) {
+  paste(transect_df$specimen[1], transect_df$transect[1], sep = "-")
+})
+names(df_list_to_process) <- list_names
+
+# Run the automated function
+initial_results_indexed <- process_otoliths(df_list_to_process)
+
+# Add a row-number index *within each transect* to the data
+df_app_data <- df_to_process %>%
+  group_by(specimen, transect) %>%
+  mutate(index = row_number()) %>%
+  ungroup()
+
+# Convert start/end *indices* to *time values*
+initial_cutoffs_df <- initial_results_indexed %>%
+  tidyr::separate(transect, into = c("specimen", "transect"), sep = "-", remove = FALSE) %>%
+  mutate(specimen = as.factor(specimen), transect = as.factor(transect)) %>%
+  # Join to find start_time
+  left_join(
+    df_app_data %>% select(specimen, transect, index, time),
+    by = c("specimen", "transect", "start_index" = "index")
+  ) %>%
+  rename(start_time = time) %>%
+  # Join to find end_time
+  left_join(
+    df_app_data %>% select(specimen, transect, index, time),
+    by = c("specimen", "transect", "end_index" = "index")
+  ) %>%
+  rename(end_time = time) %>%
+  select(specimen, transect, start_time, end_time)
+
+# Handle any NAs (e.g., if index was out of bounds) by setting to min/max
+initial_cutoffs_df <- initial_cutoffs_df %>%
+  group_by(specimen, transect) %>%
+  mutate(
+    min_time = min(df_app_data$time[df_app_data$specimen == .data$specimen & df_app_data$transect == .data$transect]),
+    max_time = max(df_app_data$time[df_app_data$specimen == .data$specimen & df_app_data$transect == .data$transect])
+  ) %>%
+  ungroup() %>%
+  mutate(
+    start_time = ifelse(is.na(start_time), min_time, start_time),
+    end_time = ifelse(is.na(end_time), max_time, end_time)
+  ) %>%
+  select(specimen, transect, start_time, end_time)
+
+cat("Pre-filter complete. Launching Shiny app...\n")
+
+# --- 6. Manual Review Shiny App ---
+
+# Make data globally available to the app
+app_data <- df_app_data
+initial_cutoffs <- initial_cutoffs_df
+
+# --- App UI ---
+ui <- fluidPage(
+  titlePanel("Otolith Cutoff Review (Top 2 Transects)"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("specimen", "Select Specimen:",
+                  choices = sort(unique(app_data$specimen))),
+      uiOutput("transect_selector"),
+      
+      h4("Selected Cutoffs:"),
+      textOutput("start_time_display"),
+      textOutput("end_time_display"),
+      
+      br(),
+      actionButton("set_start", "Set Start from Click"),
+      actionButton("set_end", "Set End from Click"),
+      br(),
+      br(),
+      actionButton("save_cutoffs", "Save All Changes"),
+      downloadButton("download_cutoffs", "Download Cutoffs as CSV"),
+      
+      hr(),
+      h4("Click Info:"),
+      verbatimTextOutput("click_info")
+    ),
+    mainPanel(
+      plotOutput("cutoff_plot",
+                 height = "600px",
+                 click = "plot_click",
+                 brush = brushOpts(id = "plot_brush", direction = "x")
+      )
+    )
+  )
+)
+
+# --- App Server ---
+server <- function(input, output, session) {
+  
+  # Reactive values to store all cutoffs
+  all_cutoffs <- reactiveVal(initial_cutoffs)
+  
+  # Reactive value for the last click
+  last_click <- reactiveVal(NULL)
+  
+  # Dynamic UI for transect selection
+  output$transect_selector <- renderUI({
+    req(input$specimen)
+    transects <- app_data %>%
+      filter(specimen == input$specimen) %>%
+      pull(transect) %>%
+      unique()
+    
+    selectInput("transect", "Select Transect:",
+                choices = sort(transects))
+  })
+  
+  # Get data for the selected transect
+  current_transect_data <- reactive({
+    req(input$specimen, input$transect)
+    app_data %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  # Get the current start/end times for the selected transect
+  current_times <- reactive({
+    req(input$specimen, input$transect)
+    all_cutoffs() %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  # Store click info
+  observeEvent(input$plot_click, {
+    last_click(input$plot_click$x)
+  })
+  
+  # --- Update Buttons ---
+  observeEvent(input$set_start, {
+    req(last_click())
+    new_start <- last_click()
+    current_end <- current_times()$end_time
+    
+    if (new_start >= current_end) {
+      showNotification("Start time must be before end time.", type = "error")
+      return()
+    }
+    
+    # Update the reactiveVal
+    df <- all_cutoffs()
+    df$start_time[df$specimen == input$specimen & df$transect == input$transect] <- new_start
+    all_cutoffs(df)
+  })
+  
+  observeEvent(input$set_end, {
+    req(last_click())
+    new_end <- last_click()
+    current_start <- current_times()$start_time
+    
+    if (new_end <= current_start) {
+      showNotification("End time must be after start time.", type = "error")
+      return()
+    }
+    
+    # Update the reactiveVal
+    df <- all_cutoffs()
+    df$end_time[df$specimen == input$specimen & df$transect == input$transect] <- new_end
+    all_cutoffs(df)
+  })
+  
+  # --- Text Displays ---
+  output$start_time_display <- renderText({
+    paste("Start Time:", round(current_times()$start_time, 2))
+  })
+  
+  output$end_time_display <- renderText({
+    paste("End Time:", round(current_times()$end_time, 2))
+  })
+  
+  output$click_info <- renderPrint({
+    req(input$plot_click)
+    cat(paste("Time:", round(input$plot_click$x, 2)))
+  })
+  
+  # --- Main Plot ---
+  output$cutoff_plot <- renderPlot({
+    req(current_transect_data(), current_times())
+    
+    data <- current_transect_data()
+    times <- current_times()
+    
+    ggplot(data, aes(x = time)) +
+      geom_line(aes(y = Ca43), color = "blue", alpha = 0.7) +
+      geom_line(aes(y = asinh(Cu65_ppm) * 1e5), color = "darkorange", alpha = 0.7) + # Scale for visibility
+      
+      geom_vline(xintercept = times$start_time, color = "green", linetype = "dashed", linewidth = 1) +
+      geom_vline(xintercept = times$end_time, color = "red", linetype = "dashed", linewidth = 1) +
+      
+      scale_y_continuous(
+        name = "Ca43 (Blue)",
+        sec.axis = sec_axis(~. / 1e5, name = "asinh(Cu65) (Orange)")
+      ) +
+      labs(title = paste("Specimen:", input$specimen, "- Transect:", input$transect),
+           x = "Time (Elapsed)", y = "Signal") +
+      theme_bw() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold"),
+        axis.title.y.left = element_text(color = "blue"),
+        axis.title.y.right = element_text(color = "darkorange")
+      )
+  })
+  
+  # --- Save/Download ---
+  observeEvent(input$save_cutoffs, {
+    # This is more for a real app; for this one, download is the save
+    showNotification("Changes saved in app session. Click Download to get the CSV.", type = "message")
+  })
+  
+  output$download_cutoffs <- downloadHandler(
+    filename = function() {
+      "manual_cutoffs.csv"
+    },
+    content = function(file) {
+      write.csv(all_cutoffs(), file, row.names = FALSE)
+    }
+  )
+}
+
+# --- Run the App ---
+shinyApp(ui = ui, server = server)
+```
+
+# filter dataframe after above shiny
+
+```{r}
+# --- 1. Load Packages ---
+library(tidyverse)
+library(readr) # ‼️ Added
+library(purrr) # ‼️ Added
+library(reshape2)
+
+# --- 2. Load and Filter Data (Mirrors App Logic) ---
+
+# ‼️ --- THIS ENTIRE SECTION IS UPDATED --- ‼️
+
+cat("Loading raw ICP-MS data...\n")
+df_raw <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df_raw <- df_raw[c(30:184)] # Select otoliths
+
+# Bind all transects into one dataframe
+df_list_raw <- list()
+for(i in 1:length(df_raw)){
+  spec <- names(df_raw[i])
+  df_list_raw[[i]] <- df_raw[[i]]
+  df_list_raw[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df_list_raw[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+}
+df <- do.call("rbind", df_list_raw)
+df <- rename(df, "time" = `Elapsed Time`)
+
+# --- 2. Load Transect Grades & Filter ---
+cat("Loading transect grades...\n")
+grades_file <- "transect grades.xlsx"
+if (!file.exists(grades_file)) {
+  stop(paste("Error:", grades_file, "not found. Please upload it."))
+}
+
+grades_wide <- read_xlsx(grades_file)
+
+
+# Convert grades to long format
+grades_long <- grades_wide %>%
+  rename(specimen_num = `Specimen Number`) %>%
+  pivot_longer(
+    cols = starts_with("Transect"),
+    names_to = "transect_name",
+    values_to = "grade"
+  ) %>%
+  filter(!is.na(grade)) %>%
+  mutate(
+    specimen = sprintf("oto%02d", specimen_num),
+    transect = str_extract(transect_name, "\\d+"),
+  ) %>%
+  select(specimen, transect, grade)
+
+# Get the "Top 2" transects for each specimen
+top_2_transects <- grades_long %>%
+  group_by(specimen) %>%
+  slice_min(order_by = grade, n = 2, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    specimen = as.factor(specimen),
+    transect = as.factor(transect)
+  )
+
+cat("Successfully identified Top 2 transects per specimen.\n")
+
+# Define "unusable" (red) list.
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+
+# 1. Remove unusable specimens
+df_semi_filtered <- df %>%
+  filter(!specimen %in% unusable)
+
+# 2. Keep ONLY the top 2 transects
+# This is the base dataframe we will apply cutoffs to
+df_to_filter <- df_semi_filtered %>%
+  inner_join(top_2_transects, by = c("specimen", "transect"))
+
+cat("Main dataframe filtered. Ready for manual cutoffs.\n")
+
+# ‼️ --- END OF UPDATED SECTION --- ‼️
+
+
+# --- 3. Load Your Manual Cutoffs ---
+# Make sure the CSV file is in your working directory
+cutoff_file <- "manual_cutoffs_new.csv"
+
+if (!file.exists(cutoff_file)) {
+  stop("Error: 'manual_cutoffs.csv' not found. 
+       Please make sure you saved the file from the Shiny app.")
+}
+
+# Read the cutoffs file.
+# We must ensure the column types match 'df_filtered' for the join.
+manual_cutoffs <- read_csv(cutoff_file, 
+                           col_types = cols(
+                             specimen = col_factor(),
+                             transect = col_factor(),
+                             start_time = col_double(),
+                             end_time = col_double()
+                           ))
+
+cat("Successfully loaded 'manual_cutoffs.csv'.\n")
+
+# --- 4. Join and Filter Data ---
+
+# Join the cutoffs to the main dataframe
+# ‼️ UPDATED: use df_to_filter
+df_joined <- df_to_filter %>%
+  inner_join(manual_cutoffs, by = c("specimen", "transect"))
+
+# Filter the data based on the manual start and end times
+final_filtered_data <- df_joined %>%
+  filter(time >= start_time & time <= end_time) %>%
+  # Remove the extra time columns
+  select(-start_time, -end_time)
+
+cat("Successfully filtered data based on manual cutoffs.\n")
+
+# --- 5. Save and Inspect ---
+# You can now use 'final_filtered_data' for your analysis
+cat("Final dataframe 'final_filtered_data' is ready.\n")
+head(final_filtered_data)
+
+# Optional: Save this final, clean dataframe to a new file
+saveRDS(final_filtered_data, "RDS_dataframes/ICP-MS_manual_filtered_11042025.RDS")
+write.csv(final_filtered_data, "ICPMS_final_filtered_data_11042025.csv", row.names = FALSE)
+
+```
+
+
+# identify core, mark middle as point after, until ~10% of end which = edge
+
+
+
+```{r}
+# --- 0. Load Packages ---
+library(shiny)
+library(ggplot2)
+library(tidyverse)
+library(readr)
+library(purrr)
+library(readxl) # ‼️ Added for read_xlsx
+
+# --- 1. Load and Prepare Data ---
+# This section runs ONCE when the app starts.
+# It loads all necessary data and prepares the 'final_filtered_data'.
+
+cat("Loading and preparing data for app...\n")
+
+# --- Load Raw Data ---
+df_raw <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df_raw <- df_raw[c(30:184)] # Select otoliths
+df_list_raw <- list()
+for(i in 1:length(df_raw)){
+  spec <- names(df_raw[i])
+  df_list_raw[[i]] <- df_raw[[i]]
+  df_list_raw[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df_list_raw[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+}
+df <- do.call("rbind", df_list_raw)
+df <- rename(df, "time" = `Elapsed Time`)
+
+# --- Load Grades and Filter to Top 2 ---
+cat("Loading transect grades...\n")
+# ‼️ UPDATED based on your correction
+grades_file <- "transect grades.xlsx"
+if (!file.exists(grades_file)) {
+  stop(paste("Error:", grades_file, "not found. Please upload it."))
+}
+
+grades_wide <- read_xlsx(grades_file)
+# ‼️ END UPDATED BLOCK
+
+grades_long <- grades_wide %>%
+  rename(specimen_num = `Specimen Number`) %>%
+  pivot_longer(
+    cols = starts_with("Transect"),
+    names_to = "transect_name",
+    values_to = "grade"
+  ) %>%
+  filter(!is.na(grade)) %>%
+  mutate(
+    specimen = sprintf("oto%02d", specimen_num),
+    transect = str_extract(transect_name, "\\d+"),
+  ) %>%
+  select(specimen, transect, grade)
+
+top_2_transects <- grades_long %>%
+  group_by(specimen) %>%
+  slice_min(order_by = grade, n = 2, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    specimen = as.factor(specimen),
+    transect = as.factor(transect)
+  )
+
+# --- Filter Main DF ---
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+df_semi_filtered <- df %>%
+  filter(!specimen %in% unusable)
+
+df_to_filter <- df_semi_filtered %>%
+  inner_join(top_2_transects, by = c("specimen", "transect"))
+
+# --- Load Manual TRANSECT Cutoffs ---
+cutoff_file <- "manual_cutoffs.csv"
+if (!file.exists(cutoff_file)) {
+  stop("Error: 'manual_cutoffs.csv' not found. 
+       Please make sure you saved this file from the previous app.")
+}
+manual_cutoffs <- read_csv(cutoff_file, 
+                           col_types = cols(
+                             specimen = col_factor(),
+                             transect = col_factor(),
+                             start_time = col_double(),
+                             end_time = col_double()
+                           ))
+
+# --- Create the Final, Filtered Data ---
+df_joined <- df_to_filter %>%
+  inner_join(manual_cutoffs, by = c("specimen", "transect"))
+
+# This is the dataframe the app will use
+final_app_data <- df_joined %>%
+  filter(time >= start_time & time <= end_time) %>%
+  select(-start_time, -end_time) %>%
+  # Add a row index *within each transect*
+  group_by(specimen, transect) %>%
+  mutate(index = row_number()) %>%
+  ungroup()
+
+# --- Prepare App Data ---
+# Get list of elements for the dropdown
+# ‼️ UPDATED: Restrict choices to only these three elements
+element_choices <- c("Ba138_ppm", "Mg24_ppm", "Mn55_ppm")
+
+# Create a dataframe to store the core boundaries
+initial_core_df <- final_app_data %>%
+  group_by(specimen, transect) %>%
+  summarise() %>% # Get unique specimen-transect pairs
+  ungroup() %>%
+  mutate(
+    core_start_index = 1,     # Default start
+    core_end_index = 20     # Default end
+  )
+
+cat("Data processing complete. Launching app...\n")
+
+# --- 2. Shiny App UI ---
+ui <- fluidPage(
+  titlePanel("Otolith Core Definition"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("specimen", "Select Specimen:",
+                  choices = sort(unique(final_app_data$specimen))),
+      
+      # ‼️ NEW: Transect selector
+      uiOutput("transect_selector_ui"),
+      
+      selectInput("element", "Select Element to Plot:",
+                  choices = element_choices,
+                  selected = "Ba138_ppm"),
+      
+      hr(),
+      h4("Edit Core Boundaries:"),
+      actionButton("set_start", "Set Core Start from Click"),
+      actionButton("set_end", "Set Core End from Click"),
+      
+      hr(),
+      h4("Click Info:"),
+      verbatimTextOutput("click_info"),
+      
+      h4("Current Core Boundaries:"),
+      verbatimTextOutput("core_info_display"),
+      
+      hr(),
+      downloadButton("download_core_defs", "Download Core Definitions")
+    ),
+    mainPanel(
+      # ‼️ UPDATED: Now a single plot, not faceted
+      plotOutput("core_plot",
+                 height = "600px", # Can be shorter now
+                 click = "plot_click"
+      )
+    )
+  )
+)
+
+# --- 3. Shiny App Server ---
+server <- function(input, output, session) {
+  
+  # Reactive value to store all core boundaries
+  all_core_data <- reactiveVal(initial_core_df)
+  
+  # Reactive value to store the last click info
+  last_click_info <- reactiveVal(NULL)
+  
+  # ‼️ NEW: Dynamic UI for transect selection
+  output$transect_selector_ui <- renderUI({
+    req(input$specimen)
+    transect_choices <- final_app_data %>%
+      filter(specimen == input$specimen) %>%
+      pull(transect) %>%
+      unique() %>%
+      sort()
+    
+    selectInput("transect", "Select Transect:",
+                choices = transect_choices)
+  })
+  
+  # ‼️ UPDATED: Get data for the selected TRANSECT
+  current_transect_data <- reactive({
+    req(input$specimen, input$transect)
+    final_app_data %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  # ‼️ UPDATED: Get the core boundaries for the selected TRANSECT
+  current_core_bounds <- reactive({
+    req(input$specimen, input$transect)
+    all_core_data() %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  # Store click info
+  observeEvent(input$plot_click, {
+    # ‼️ UPDATED: Simpler click logic
+    last_click_info(list(
+      index = round(input$plot_click$x)
+    ))
+  })
+  
+  # --- Update Buttons ---
+  observeEvent(input$set_start, {
+    # ‼️ UPDATED: Simpler logic
+    req(last_click_info(), input$specimen, input$transect)
+    
+    clicked_index <- last_click_info()$index
+    
+    # Get current end time for validation
+    current_end <- current_core_bounds()$core_end_index
+    
+    if (clicked_index >= current_end) {
+      showNotification("Core start must be before core end.", type = "error")
+      return()
+    }
+    
+    # Update the reactiveVal
+    df <- all_core_data()
+    df$core_start_index[df$specimen == input$specimen & df$transect == input$transect] <- clicked_index
+    all_core_data(df)
+  })
+  
+  observeEvent(input$set_end, {
+    # ‼️ UPDATED: Simpler logic
+    req(last_click_info(), input$specimen, input$transect)
+    
+    clicked_index <- last_click_info()$index
+    
+    # Get current start time for validation
+    current_start <- current_core_bounds()$core_start_index
+    
+    if (clicked_index <= current_start) {
+      showNotification("Core end must be after core start.", type = "error")
+      return()
+    }
+    
+    # Update the reactiveVal
+    df <- all_core_data()
+    df$core_end_index[df$specimen == input$specimen & df$transect == input$transect] <- clicked_index
+    all_core_data(df)
+  })
+  
+  # --- Text Displays ---
+  output$click_info <- renderPrint({
+    info <- last_click_info()
+    if (is.null(info)) {
+      cat("Click on a plot to see info.")
+    } else {
+      cat(paste("Clicked Index:", info$index))
+    }
+  })
+  
+  output$core_info_display <- renderPrint({
+    bounds <- current_core_bounds()
+    print(bounds[, c("transect", "core_start_index", "core_end_index")], row.names = FALSE)
+  })
+  
+  # --- Main Plot ---
+  output$core_plot <- renderPlot({
+    # ‼️ UPDATED: Simpler plot definition
+    req(current_transect_data(), input$element, current_core_bounds())
+    
+    plot_data <- current_transect_data()
+    plot_element <- input$element
+    core_lines <- current_core_bounds()
+    
+    ggplot(plot_data, aes(x = index, y = .data[[plot_element]])) +
+      geom_point(color = "grey70", alpha = 0.6) +
+      geom_smooth(color = "blue", linewidth = 1.2, se = FALSE, method = "loess", span = 0.2) +
+      
+      # Add vertical lines for core
+      geom_vline(aes(xintercept = core_lines$core_start_index), 
+                 color = "green", linetype = "dashed", linewidth = 1) +
+      geom_vline(aes(xintercept = core_lines$core_end_index), 
+                 color = "red", linetype = "dashed", linewidth = 1) +
+      
+      # ‼️ REMOVED: facet_wrap()
+      
+      labs(title = paste("Specimen:", input$specimen, "- Transect:", input$transect),
+           subtitle = "Grey: Raw Data, Blue: Smoothed Trend, Green/Red: Core Boundaries",
+           x = "Row Index (from filtered start point)",
+           y = plot_element) +
+      theme_bw() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+  })
+  
+  # --- Download Handler ---
+  output$download_core_defs <- downloadHandler(
+    filename = function() {
+      "manual_core_definitions.csv"
+    },
+    content = function(file) {
+      write.csv(all_core_data(), file, row.names = FALSE)
+    }
+  )
+}
+
+# --- 4. Run the App ---
+
+options = list(launch.browser = T)
+shinyApp(ui = ui, server = server, options = list(launch.browser = TRUE))
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+#### ANOTHER FUCKING SHINY APP, THIS TIME WITH IMAGES
+
+```{r}
+# --- 0. Set Upload Limit & Load Packages ---
+# ‼️ THIS IS THE FIX: Increase max file upload size to 300MB
+options(shiny.maxRequestSize = 300 * 1024^2)
+
+# install.packages(c("shiny", "tidyverse", "readxl", "magick", "viridis", "purrr"))
+library(shiny)
+library(tidyverse)
+library(readxl)      # For read_xlsx
+library(magick)      # For image processing
+library(viridis)     # For viridis color scale
+library(purrr)
+
+# --- 1. Load & Prepare Data (Global) ---
+# This code runs once when the app starts.
+
+# --- 1a. Load Transect Grades ---
+cat("Loading transect grades...\n")
+grades_file <- "transect grades.xlsx" # Corrected file name
+if (!file.exists(grades_file)) {
+  stop(paste("Error:", grades_file, "not found. Please upload it."))
+}
+
+grades_wide <- read_xlsx(grades_file) # Corrected function
+
+# Convert grades to long format
+grades_long <- grades_wide %>%
+  rename(specimen_num = `Specimen Number`) %>%
+  pivot_longer(
+    cols = starts_with("Transect"),
+    names_to = "transect_name",
+    values_to = "grade"
+  ) %>%
+  filter(!is.na(grade)) %>%
+  mutate(
+    specimen = sprintf("oto%02d", specimen_num),
+    transect = str_extract(transect_name, "\\d+"),
+  ) %>%
+  select(specimen, transect, grade)
+
+# Get the "Top 2" transects for each specimen
+top_2_transects <- grades_long %>%
+  group_by(specimen) %>%
+  slice_min(order_by = grade, n = 2, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    specimen = as.factor(specimen),
+    transect = as.factor(transect)
+  )
+
+# --- 1b. Load Raw ICP-MS Data ---
+cat("Loading raw ICP-MS data...\n")
+df_raw <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df_raw <- df_raw[c(30:184)] # Select otoliths
+
+# Bind all transects into one dataframe
+df_list_raw <- list()
+for(i in 1:length(df_raw)){
+  spec <- names(df_raw[i])
+  df_list_raw[[i]] <- df_raw[i][[1]]
+  df_list_raw[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df_list_raw[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+}
+df <- do.call("rbind", df_list_raw)
+df <- rename(df, "time" = `Elapsed Time`)
+
+# --- 1c. Filter Main Data ---
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+df_semi_filtered <- df %>%
+  filter(!specimen %in% unusable)
+
+# Keep ONLY the top 2 transects
+df_to_process <- df_semi_filtered %>%
+  inner_join(top_2_transects, by = c("specimen", "transect"))
+
+# --- 1d. Load Manual Cutoffs ---
+cat("Loading manual cutoffs...\n")
+cutoff_file <- "manual_cutoffs.csv"
+if (!file.exists(cutoff_file)) {
+  stop(paste("Error:", cutoff_file, "not found. Run previous app first."))
+}
+manual_cutoffs <- read_csv(cutoff_file, 
+                           col_types = cols(
+                             specimen = col_factor(),
+                             transect = col_factor(),
+                             start_time = col_double(),
+                             end_time = col_double()
+                           ))
+
+# --- 1e. Create Final Filtered Dataframe ---
+df_joined <- df_to_process %>%
+  inner_join(manual_cutoffs, by = c("specimen", "transect"))
+
+final_filtered_data <- df_joined %>%
+  filter(time >= start_time & time <= end_time) %>%
+  select(-start_time, -end_time) %>%
+  group_by(specimen, transect) %>%
+  mutate(index = row_number()) %>% # Add the row index
+  ungroup()
+
+cat("Data processing complete. Final 'final_filtered_data' ready.\n")
+
+# --- 1f. Prepare for App ---
+# This is the data the app will use
+app_data <- final_filtered_data
+
+# Define the elements for the dropdown
+element_choices <- c("Ba138_ppm", "Mg24_ppm", "Mn55_ppm")
+
+# Create a dataframe to store core cutoffs
+# Initialize with NA values
+core_cutoff_data <- app_data %>%
+  distinct(specimen, transect) %>%
+  mutate(
+    core_start_index = NA_integer_,
+    core_end_index = NA_integer_
+  )
+
+# --- 2. Shiny App UI ---
+ui <- fluidPage(
+  titlePanel("Otolith Core Validator: 1D Plot + 2D Image"),
+  
+  # --- 2a. Main Row ---
+  fluidRow(
+    # --- 2b. Left Column (1D Plot & Controls) ---
+    column(6,
+      wellPanel(
+        fluidRow(
+          column(4, selectInput("specimen", "Select Specimen:", 
+                                choices = sort(unique(app_data$specimen)))),
+          column(4, uiOutput("transect_selector")),
+          column(4, selectInput("element", "Select Element:",
+                                choices = element_choices, selected = "Ba138_ppm"))
+        )
+      ),
+      plotOutput("element_plot", 
+                 height = "400px", 
+                 click = "plot_click"),
+      
+      h4("Core Selection:"),
+      textOutput("core_start_display"),
+      textOutput("core_end_display"),
+      actionButton("set_core_start", "Set Core Start from Click"),
+      actionButton("set_core_end", "Set Core End from Click"),
+      downloadButton("download_cores", "Download Core Cutoffs (CSV)"),
+      
+      h4("Click Info (1D Plot):"),
+      verbatimTextOutput("click_info_1d")
+    ),
+    
+    # --- 2c. Right Column (2D Image) ---
+    column(6,
+      wellPanel(
+        fileInput("upload_image", "Upload Otolith Image (.tif, .jpg, .png)",
+                  accept = c("image/tiff", "image/jpeg", "image/png", ".tif", ".jpg", ".tiff"))
+      ),
+      plotOutput("image_plot", 
+                 height = "600px", 
+                 click = "image_click"),
+      
+      h4("Click Info (Image):"),
+      verbatimTextOutput("click_info_2d")
+    )
+  )
+)
+
+# --- 3. Shiny App Server ---
+server <- function(input, output, session) {
+  
+  # --- 3a. Reactive Values ---
+  rv <- reactiveValues(
+    core_cutoffs = core_cutoff_data, # Holds all core start/end indices
+    last_plot_click = NULL,          # Last click on 1D plot
+    image_clicks = list(),           # Stores the two clicks for the transect line
+    transect_image = NULL            # Stores the uploaded image
+  )
+  
+  # --- 3b. Dynamic Transect UI ---
+  output$transect_selector <- renderUI({
+    req(input$specimen)
+    transects <- app_data %>%
+      filter(specimen == input$specimen) %>%
+      pull(transect) %>%
+      unique()
+    
+    selectInput("transect", "Select Transect:",
+                choices = sort(transects))
+  })
+  
+  # --- 3c. Current Selections ---
+  current_transect_data <- reactive({
+    req(input$specimen, input$transect)
+    app_data %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  current_core_times <- reactive({
+    req(input$specimen, input$transect)
+    rv$core_cutoffs %>%
+      filter(specimen == input$specimen, transect == input$transect)
+  })
+  
+  current_element_data <- reactive({
+    req(current_transect_data(), input$element)
+    current_transect_data() %>%
+      select(index, value = all_of(input$element))
+  })
+  
+  # --- 3d. 1D Plot Logic (Left Column) ---
+  
+  # Store 1D plot click
+  observeEvent(input$plot_click, {
+    rv$last_plot_click <- input$plot_click$x
+  })
+  
+  # Set core start/end
+  observeEvent(input$set_core_start, {
+    req(rv$last_plot_click)
+    new_start <- round(rv$last_plot_click)
+    current_end <- current_core_times()$core_end_index
+    
+    if (!is.na(current_end) && new_start >= current_end) {
+      showNotification("Core start must be before core end.", type = "error")
+      return()
+    }
+    
+    df <- rv$core_cutoffs
+    df$core_start_index[df$specimen == input$specimen & df$transect == input$transect] <- new_start
+    rv$core_cutoffs <- df
+  })
+  
+  observeEvent(input$set_core_end, {
+    req(rv$last_plot_click)
+    new_end <- round(rv$last_plot_click)
+    current_start <- current_core_times()$core_start_index
+    
+    if (!is.na(current_start) && new_end <= current_start) {
+      showNotification("Core end must be after core start.", type = "error")
+      return()
+    }
+    
+    df <- rv$core_cutoffs
+    df$core_end_index[df$specimen == input$specimen & df$transect == input$transect] <- new_end
+    rv$core_cutoffs <- df
+  })
+  
+  # 1D Plot Output
+  output$element_plot <- renderPlot({
+    req(current_element_data())
+    
+    data <- current_element_data()
+    times <- current_core_times()
+    
+    ggplot(data, aes(x = index, y = value)) +
+      geom_point(color = "grey80", alpha = 0.5) +
+      geom_smooth(color = "blue", fill = "blue", alpha = 0.2, method = "loess", span = 0.2) +
+      
+      geom_vline(xintercept = times$core_start_index, color = "green", linetype = "dashed", linewidth = 1) +
+      geom_vline(xintercept = times$core_end_index, color = "red", linetype = "dashed", linewidth = 1) +
+      
+      labs(title = paste("1D Elemental Plot:", input$element),
+           x = "Row Index (from filtered start point)",
+           y = "Element Value") +
+      theme_bw(base_size = 14)
+  })
+  
+  # 1D Click Info Output
+  output$click_info_1d <- renderPrint({
+    if (!is.null(rv$last_plot_click)) {
+      cat(paste("Index:", round(rv$last_plot_click)))
+    }
+  })
+  
+  # Core text displays
+  output$core_start_display <- renderText({
+    paste("Core Start Index:", current_core_times()$core_start_index)
+  })
+  output$core_end_display <- renderText({
+    paste("Core End Index:", current_core_times()$core_end_index)
+  })
+  
+  # --- 3e. 2D Image Plot Logic (Right Column) ---
+  
+  # Load image
+  observeEvent(input$upload_image, {
+    req(input$upload_image)
+    rv$image_clicks <- list() # Reset clicks on new image
+    tryCatch({
+      rv$transect_image <- image_read(input$upload_image$datapath)
+    }, error = function(e) {
+      showNotification(paste("Error reading image:", e$message), type = "error")
+      rv$transect_image <- NULL
+    })
+  })
+  
+  # Store image clicks
+  observeEvent(input$image_click, {
+    if (length(rv$image_clicks) < 2) {
+      rv$image_clicks <- c(rv$image_clicks, list(c(input$image_click$x, input$image_click$y)))
+    } else {
+      rv$image_clicks <- list(c(input$image_click$x, input$image_click$y)) # Start over
+    }
+  })
+  
+  # 2D Image Plot Output
+  output$image_plot <- renderPlot({
+    if (is.null(rv$transect_image)) {
+      plot(1, type="n", axes=FALSE, xlab="", ylab="")
+      text(1, 1, "Please upload a .tif or .jpg image", cex=1.5)
+      return()
+    }
+    
+    # Plot the base image
+    par(mar = c(0, 0, 0, 0)) # Remove plot margins
+    plot(rv$transect_image)
+    
+    # If we have two clicks, draw the colored line
+    if (length(rv$image_clicks) == 2) {
+      p1 <- rv$image_clicks[[1]]
+      p2 <- rv$image_clicks[[2]]
+      
+      # Get the 1D elemental data to map
+      elem_data <- current_element_data()$value
+      n_points <- length(elem_data)
+      
+      # --- Robust Color Scaling (as requested) ---
+      q_low <- quantile(elem_data, 0.05, na.rm = TRUE)
+      q_high <- quantile(elem_data, 0.95, na.rm = TRUE)
+      
+      if (is.na(q_low) || is.na(q_high) || q_low == q_high) {
+        colors <- rep("#808080", n_points) # Fallback to grey
+      } else {
+        elem_data_capped <- pmax(q_low, pmin(q_high, elem_data))
+        elem_data_norm <- (elem_data_capped - q_low) / (q_high - q_low)
+        colors <- viridis(100)[cut(elem_data_norm, breaks = 100, labels = FALSE)]
+        colors[is.na(colors)] <- "#808080" # Grey for NA
+      }
+
+      # Create x and y coordinates for the line segments
+      x_coords <- seq(p1[1], p2[1], length.out = n_points)
+      y_coords <- seq(p1[2], p2[2], length.out = n_points)
+      
+      # Draw the colored line
+      segments(
+        x0 = x_coords[-n_points], y0 = y_coords[-n_points],
+        x1 = x_coords[-1], y1 = y_coords[-1],
+        col = colors[-n_points],
+        lwd = 3 # Line width
+      )
+      
+      # --- ‼️ NEW: ADD CORE ARROWS ‼️ ---
+      times <- current_core_times()
+      
+      # --- Calculate perpendicular offset for arrows ---
+      line_vec_x <- p2[1] - p1[1]
+      line_vec_y <- p2[2] - p1[2]
+      line_length <- sqrt(line_vec_x^2 + line_vec_y^2)
+      
+      # Perpendicular vector (normalized)
+      perp_vec_x <- -line_vec_y / line_length
+      perp_vec_y <- line_vec_x / line_length
+      
+      # Offset amount (e.g., 5% of image height)
+      offset_amount <- image_info(rv$transect_image)$height * 0.05
+      
+      # Draw CORE START arrow
+      if (!is.na(times$core_start_index) && times$core_start_index <= n_points) {
+        idx <- times$core_start_index
+        # Point on the line
+        line_x <- x_coords[idx]
+        line_y <- y_coords[idx]
+        
+        # Arrow start/end points
+        arrow_start_x <- line_x + (perp_vec_x * offset_amount)
+        arrow_start_y <- line_y + (perp_vec_y * offset_amount)
+        arrow_end_x <- line_x + (perp_vec_x * offset_amount * 0.1) # Point closer to line
+        arrow_end_y <- line_y + (perp_vec_y * offset_amount * 0.1)
+        
+        arrows(arrow_start_x, arrow_start_y, arrow_end_x, arrow_end_y,
+               col = "red", lwd = 3, length = 0.15)
+      }
+      
+      # Draw CORE END arrow
+      if (!is.na(times$core_end_index) && times$core_end_index <= n_points) {
+        idx <- times$core_end_index
+        # Point on the line
+        line_x <- x_coords[idx]
+        line_y <- y_coords[idx]
+        
+        # Arrow start/end points
+        arrow_start_x <- line_x + (perp_vec_x * offset_amount)
+        arrow_start_y <- line_y + (perp_vec_y * offset_amount)
+        arrow_end_x <- line_x + (perp_vec_x * offset_amount * 0.1)
+        arrow_end_y <- line_y + (perp_vec_y * offset_amount * 0.1)
+        
+        arrows(arrow_start_x, arrow_start_y, arrow_end_x, arrow_end_y,
+               col = "red", lwd = 3, length = 0.15)
+      }
+      # --- ‼️ END NEW CODE ‼️ ---
+      
+    } 
+    # Draw the click points
+    else if (length(rv$image_clicks) == 1) {
+      points(rv$image_clicks[[1]][1], rv$image_clicks[[1]][2], col = "red", pch = 3, cex = 2, lwd = 3)
+    }
+  })
+  
+  # 2D Click Info Output
+  output$click_info_2d <- renderPrint({
+    if (is.null(rv$transect_image)) {
+        cat("To zoom: Hold Ctrl and use mouse wheel.\n\n")
+        cat("Waiting for image upload...")
+    } else if (length(rv$image_clicks) == 0) {
+      cat("To zoom: Hold Ctrl and use mouse wheel.\n\n")
+      cat("Click on the image to set the transect START point.")
+    } else if (length(rv$image_clicks) == 1) {
+      cat("To zoom: Hold Ctrl and use mouse wheel.\n\n")
+      cat("Click on the image to set the transect END point.")
+    } else {
+      cat("To zoom: Hold Ctrl and use mouse wheel.\n\n")
+      cat("Transect line drawn. Click again to restart.")
+    }
+  })
+  
+  # --- 3f. Download Logic ---
+  output$download_cores <- downloadHandler(
+    filename = function() {
+      "core_cutoffs.csv"
+    },
+    content = function(file) {
+      # Save only the rows that have been marked
+      final_cutoffs <- rv$core_cutoffs %>%
+        filter(!is.na(core_start_index) & !is.na(core_end_index))
+      write.csv(final_cutoffs, file, row.names = FALSE)
+    }
+  )
+}
+
+# --- 4. Run the App ---
+shinyApp(ui = ui, server = server)
+
+
+
+# THIS WORKS WELL, CUTOFFS ARE FOUND IN : ICPMS_corevalues.csv
+```
+
+
+
+
+
+# apply new filter to my otolith dataframe.
+
+```{r}
+# --- 1. Load Packages ---
+# install.packages(c("tidyverse", "readxl"))
+library(tidyverse)
+library(readxl)
+
+# --- 2. Re-create the 'final_filtered_data' (from previous script) ---
+# This ensures this script is runnable on its own and uses the correct data.
+
+# 2a. Load Grades
+cat("Loading transect grades...\n")
+grades_file <- "transect grades.xlsx"
+if (!file.exists(grades_file)) {
+  stop(paste("Error:", grades_file, "not found."))
+}
+grades_wide <- read_xlsx(grades_file)
+
+grades_long <- grades_wide %>%
+  rename(specimen_num = `Specimen Number`) %>%
+  pivot_longer(
+    cols = starts_with("Transect"),
+    names_to = "transect_name",
+    values_to = "grade"
+  ) %>%
+  filter(!is.na(grade)) %>%
+  mutate(
+    specimen = sprintf("oto%02d", specimen_num),
+    transect = str_extract(transect_name, "\\d+"),
+  ) %>%
+  select(specimen, transect, grade)
+
+top_2_transects <- grades_long %>%
+  group_by(specimen) %>%
+  slice_min(order_by = grade, n = 2, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    specimen = as.factor(specimen),
+    transect = as.factor(transect)
+  )
+
+# 2b. Load Raw ICP-MS Data
+cat("Loading raw ICP-MS data...\n")
+df_raw <- readRDS("RDS_dataframes/ICP-MS_clean.RDS")
+df_raw <- df_raw[c(30:184)]
+df_list_raw <- list()
+for(i in 1:length(df_raw)){
+  spec <- names(df_raw[i])
+  df_list_raw[[i]] <- df_raw[i][[1]]
+  df_list_raw[[i]]$specimen <- as.factor(str_sub(spec, start= 0,end = 5))
+  df_list_raw[[i]]$transect <- as.factor(as.numeric(str_sub(spec, start= -1)) + 1)
+}
+df <- do.call("rbind", df_list_raw)
+df <- rename(df, "time" = `Elapsed Time`)
+
+# 2c. Filter by "Top 2" and "Unusable"
+unusable <- paste0("oto", c(05, 10, 12, 14, 30, 37, 38, 40))
+df_semi_filtered <- df %>%
+  filter(!specimen %in% unusable)
+df_to_process <- df_semi_filtered %>%
+  inner_join(top_2_transects, by = c("specimen", "transect"))
+
+# 2d. Load Manual Transect Cutoffs
+cat("Loading manual transect cutoffs (manual_cutoffs.csv)...\n")
+cutoff_file <- "manual_cutoffs.csv"
+if (!file.exists(cutoff_file)) {
+  stop(paste("Error:", cutoff_file, "not found."))
+}
+manual_cutoffs <- read_csv(cutoff_file, 
+                           col_types = cols(
+                             specimen = col_factor(),
+                             transect = col_factor(),
+                             start_time = col_double(),
+                             end_time = col_double()
+                           ))
+
+# 2e. Create the 'final_filtered_data'
+df_joined <- df_to_process %>%
+  inner_join(manual_cutoffs, by = c("specimen", "transect"))
+
+final_filtered_data <- df_joined %>%
+  filter(time >= start_time & time <= end_time) %>%
+  select(-start_time, -end_time) %>%
+  group_by(specimen, transect) %>%
+  mutate(index = row_number()) %>% # The index *within* the filtered transect
+  ungroup()
+
+cat("Created 'final_filtered_data'.\n")
+
+# --- 3. Load Your Manually-Defined Core Cutoffs ---
+cat("Loading core cutoffs (ICPMS_corevalues.csv)...\n")
+core_cutoff_file <- "ICPMS_corevalues.csv"
+if (!file.exists(core_cutoff_file)) {
+  stop(paste("Error:", core_cutoff_file, "not found."))
+}
+core_cutoffs <- read_csv(core_cutoff_file,
+                         col_types = cols(
+                           specimen = col_factor(),
+                           transect = col_factor(),
+                           core_start_index = col_integer(),
+                           core_end_index = col_integer()
+                         ))
+
+# --- 4. Join Core Cutoffs and Define Regions ---
+cat("Joining core cutoffs and defining regions...\n")
+
+# Join the core definitions to the filtered data
+data_with_cores <- final_filtered_data %>%
+  left_join(core_cutoffs, by = c("specimen", "transect"))
+
+# Define regions based on your rules
+data_with_regions_raw <- data_with_cores %>%
+  # Handle any transects you didn't mark in the app
+  filter(!is.na(core_start_index)) %>% 
+  group_by(specimen, transect) %>%
+  # Get total length *after* core start (as per your Rule 2)
+  # This step is complex. Let's do it simpler.
+  
+  # --- Simpler & Better Logic ---
+  # 1. Get total length of the *entire* transect (after time filtering)
+  mutate(total_length = n()) %>%
+  # 2. Define the edge_start_index based on your 10% rule
+  mutate(edge_start_index = floor(total_length * 0.90)) %>%
+  
+  # 3. Assign regions using case_when()
+  mutate(
+    oto_region = case_when(
+      # Rule 2: All points *before* core are NULL
+      index < core_start_index ~ NA_character_,
+      
+      # Rule 1: "core"
+      index >= core_start_index & index <= core_end_index ~ "core",
+      
+      # Rule 4: "edge" (Last 10%)
+      index >= edge_start_index ~ "edge",
+      
+      # Rule 3: "middle" (everything else)
+      index > core_end_index & index < edge_start_index ~ "middle"
+    )
+  ) %>% 
+  ungroup()
+
+# --- 5. Final Filtering and Formatting ---
+cat("Cleaning final dataframe...\n")
+
+final_analysis_data <- data_with_regions_raw %>%
+  # Rule 2: Remove all points BEFORE the core
+  filter(!is.na(oto_region)) %>%
+  
+  # Re-level the factor so "core" is the baseline
+  mutate(
+    oto_region = factor(oto_region, levels = c("core", "middle", "edge"))
+  )
+
+# --- 6. Inspect Your New Data ---
+cat("Done! Your final, analysis-ready dataframe is 'final_analysis_data'.\n\n")
+
+
+saveRDS(final_analysis_data,"RDS_dataframes/ICPMS_filteredregionotos.RDS")
+cat("Head of the new data:\n")
+print(head(final_analysis_data))
+
+cat("\n\nSummary of new 'oto_region' variable:\n")
+print(summary(final_analysis_data$oto_region))
+
+cat("\n\nCheck counts by specimen and region:\n")
+print(
+  final_analysis_data %>%
+    group_by(specimen, oto_region) %>%
+    summarise(n_points = n(), .groups = "drop"))
+```

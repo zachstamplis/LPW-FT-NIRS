@@ -1,6 +1,6 @@
 library(mdatools)
 library(tidyverse)
-
+library(prospectr)
 df_raw <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS")
 speccols <- names(df_raw)[grepl("^\\d", names(df_raw))]
 metacols <- setdiff(names(df_raw), speccols)

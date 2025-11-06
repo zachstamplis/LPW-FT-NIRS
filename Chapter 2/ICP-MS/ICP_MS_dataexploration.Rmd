@@ -1,0 +1,320 @@
+```{r}
+library(tidyverse)
+library(mdatools)
+library(tidyverse)
+library(prospectr)
+library(broom)
+library(purrr)
+library(pls)
+library(ggplot2)
+library(ggrepel)
+```
+
+# load data
+```{r}
+ICPMS <- readRDS(file = "C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/ICPMS_filtered_GOOD_USEME.RDS")
+
+FTNIRS <- readRDS("C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/combined_IBM_LPW_raw.RDS")
+FTNIRS <- FTNIRS %>% filter(region != "LPW")# select only IBM specimensof combined dataframe
+
+# apply savitzky golay 1,5,17 filter
+speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))]
+metacols <- setdiff(names(FTNIRS), speccols)
+FTNIRS <- cbind(FTNIRS[,metacols],
+             savitzkyGolay(as.matrix(FTNIRS[speccols]), m = 1, p = 3, w = 17)
+             )
+speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))] # reselect the FT-NIRS columns
+```
+
+
+# PCA of FT-NIRS
+```{r}
+# perform PCA on all FT-NIRS columns, store alongside specimen
+pca_FTNIRS <- mdatools::pca(FTNIRS[speccols], center = TRUE, scale = TRUE)
+# pca dataframe with first 20 PC's
+pca_df <- data.frame(specimen = FTNIRS$specimen, 
+                     pca_FTNIRS$calres$scores[,1:20])
+# clean up column names
+colnames(pca_df)[2:21] <- paste0("PC", 1:20)
+```
+
+# find averages for each region of each otolith
+```{r}
+ICPMS_summary <- ICPMS %>% group_by(specimen,transect,oto_region) %>% 
+summarize(
+    across(Ca43:PbTotal_ppm, \(x) mean(x, na.rm = TRUE))
+  )
+```
+
+# LM models
+
+```{r}
+library(tidyr)
+# This ignores the transect column and averages all cores, all middles, etc.
+ICPMS_region_avg <- ICPMS %>%
+  group_by(specimen, oto_region) %>%
+  summarize(
+    across(Ca43:PbTotal_ppm, \(x) mean(x, na.rm = TRUE))
+  )
+
+# 1. Define the elements you care about
+elements_of_interest <- c(
+  "Mg24_ppm", 
+  "Mn55_ppm", 
+  "Li7_ppm", 
+  "Zn66_ppm", 
+  "Sr88_ppm", 
+  "Ba138_ppm"
+)
+
+# 2. Create the chemical summary (average transects)
+ICPMS_region_avg <- ICPMS %>%
+  group_by(specimen, oto_region) %>%
+  summarize(
+    # Use the new .fn syntax for across, it's cleaner
+    across(all_of(elements_of_interest), 
+           .fn = \(x) mean(x, na.rm = TRUE))
+  )
+
+# 3. Pivot wider
+ICPMS_wide_region <- ICPMS_region_avg %>%
+  pivot_wider(
+    names_from = oto_region,
+    values_from = all_of(elements_of_interest),
+    names_sep = "_"
+  )
+
+# 3. Now join and run the CCA
+cca_data <- inner_join(pca_df, ICPMS_wide_region, by = "specimen")
+
+# Your X-set (the 20 PCs)
+X_vars <- cca_data %>% dplyr::select(starts_with("PC"))
+
+# Your Y-set (just the names of the 72+ chemical columns)
+Y_names <- cca_data %>% 
+  dplyr::select(-specimen, -starts_with("PC")) %>% 
+  names()
+
+# Get the names of the PC columns
+pc_names <- names(X_vars)
+
+# Create the formula string
+formula_predictors <- paste(pc_names, collapse = " + ")
+
+# This will run one model for each element and store it in a list
+model_list <- lapply(Y_names, function(chem_name) {
+  
+  # Create the full formula, e.g., "Li7_ppm_core ~ PC1 + PC2 + ..."
+  full_formula <- as.formula(paste(chem_name, "~", formula_predictors))
+  
+  # Run the linear model
+  lm(full_formula, data = cca_data)
+})
+
+# Name the list elements for easy access
+names(model_list) <- Y_names
+
+# # Example: Look at the results for Li7_ppm_core
+# summary(model_list$Li7_ppm_core)
+# 
+
+
+# Make sure you have broom installed (it's part of the tidyverse)
+# install.packages("broom")
+
+# 1. Apply glance() to every model and combine into one dataframe
+# The .id = "element_region" creates a new column from the list names
+model_summary_table <- map_dfr(model_list, glance, .id = "element_region")
+
+# 2. Select the most useful columns and rename RSE (sigma)
+final_summary <- model_summary_table %>%
+  dplyr::select(element_region, r.squared, adj.r.squared, sigma, p.value) %>%
+  rename(RSE = sigma)
+
+# 3. Sort by the best models (e.g., highest Adjusted R-squared)
+final_summary <- final_summary %>%
+  arrange(desc(adj.r.squared))
+
+# Now just print the top of this table to see your best-fitting models!
+print(head(final_summary))
+```
+
+# PLS MODEL
+
+```{r}
+# i think I should scale this shit first?
+
+# Your X and Y data from before (using the data frames, not matrices)
+X_vars <- cca_data %>% dplyr::select(starts_with("PC"))
+X_vars <- as.matrix(X_vars)
+Y_vars <- cca_data %>% dplyr::select(-specimen, -starts_with("PC")) 
+Y_vars <- scale(Y_vars)
+
+# 1. Run the PLSR model
+# We'll use 10 components (ncomp = 10) and cross-validation ("CV")
+# The formula is Y ~ X
+pls_model <- plsr(Y_vars ~ X_vars, ncomp = 10, validation = "CV")
+
+# 2. Get the Y-loadings (elements)
+y_loadings_df <- as.data.frame(Yloadings(pls_model)[, 1:2])
+colnames(y_loadings_df) <- c("LV1", "LV2")
+y_loadings_df$variable <- rownames(y_loadings_df)
+y_loadings_df$type <- "Element (Y)"
+
+# 3. Get the X-loadings (PCs)
+x_loadings_df <- as.data.frame(loadings(pls_model)[, 1:2])
+colnames(x_loadings_df) <- c("LV1", "LV2")
+x_loadings_df$variable <- rownames(x_loadings_df)
+x_loadings_df$type <- "PC (X)"
+
+# 4. Combine them into one data frame
+loadings_df <- rbind(x_loadings_df, y_loadings_df)
+
+# 5. Create the biplot
+ggplot(loadings_df, aes(x = LV1, y = LV2, label = variable, color = type)) +
+  geom_point() +
+  geom_text_repel(max.overlaps = 15) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(
+    title = "PLSR Loadings Biplot (LV1 vs LV2)",
+    subtitle = "Variables near each other are positively correlated",
+    x = "Latent Variable 1",
+    y = "Latent Variable 2"
+  ) +
+  theme_minimal()
+
+
+
+# mda_pls <- pls(x = X_vars, y = Y_vars, scale = T, center = F, cv = 1)
+# 
+# plot(mda_pls)
+# 
+
+
+
+
+
+
+
+# NOW PLS WITH NON PC's
+
+# 3. Now join and run the CCA
+pls_data <- inner_join(FTNIRS, ICPMS_wide_region, by = "specimen")
+
+# Your X-set (the 20 PCs)
+X_vars_full <- pls_data[,9:941]
+Y_vars_full <- scale(pls_data[,942:959])
+
+pls_model_full <- plsr(as.matrix(Y_vars_full) ~ as.matrix(X_vars_full), ncomp = 10, validation = "CV")
+
+# 2. Get the Y-loadings (elements)
+y_loadings_df <- as.data.frame(Yloadings(pls_model_full)[, 1:2])
+colnames(y_loadings_df) <- c("LV1", "LV2")
+y_loadings_df$variable <- rownames(y_loadings_df)
+y_loadings_df$type <- "Element (Y)"
+
+# 3. Get the X-loadings (PCs)
+x_loadings_df <- as.data.frame(loadings(pls_model_full)[, 1:2])
+colnames(x_loadings_df) <- c("LV1", "LV2")
+x_loadings_df$variable <- rownames(x_loadings_df)
+x_loadings_df$type <- "PC (X)"
+
+# 4. Combine them into one data frame
+loadings_df <- rbind(x_loadings_df, y_loadings_df)
+
+# 5. Create the biplot
+ggplot(loadings_df, aes(x = LV1, y = LV2, label = variable, color = type)) +
+  geom_point() +
+  geom_text_repel(max.overlaps = 15) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(
+    title = "PLSR Loadings Biplot (LV1 vs LV2)",
+    subtitle = "Variables near each other are positively correlated",
+    x = "Latent Variable 1",
+    y = "Latent Variable 2"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+# install.packages("vegan")
+library(vegan)
+# Your X and Y data from before (using the data frames, not matrices)
+X_vars <- cca_data %>% dplyr::select(starts_with("PC"))
+Y_vars <- cca_data %>% dplyr::select(-specimen, -starts_with("PC")) 
+# 1. Run the RDA
+# The formula is Y ~ X, or "Chemistry explained by PCs"
+rda_model <- rda(Y_vars ~ ., data = X_vars)
+
+# 2. Plot the model
+# "scaling = 2" makes the angles between arrows reflect their correlation
+plot(rda_model, scaling = 2, main = "RDA Triplot")
+```
+
+
+# correlation heat map
+
+```{r}
+# install.packages("pheatmap")
+library(pheatmap)
+
+# 1. Calculate the correlation matrix between the two sets
+cor_matrix <- cor(X_vars, Y_vars)
+
+# 2. Create the heatmap
+# We'll cluster the rows (PCs) and columns (elements)
+# to group similar variables together.
+pheatmap(
+  cor_matrix,
+  main = "Correlation Heatmap (PCs vs. Element-Regions)",
+  fontsize_row = 8,
+  fontsize_col = 6,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE
+)
+```
+
+# RDA
+
+```{r}
+# install.packages("vegan")
+library(vegan)
+
+# 1. Create a scaled version of your Y variables
+# scale() returns a matrix, which is what these functions want anyway
+Y_vars_scaled <- scale(Y_vars)
+
+# 2. Re-run your PLSR model with the scaled Y data
+pls_model <- plsr(Y_vars_scaled ~ as.matrix(X_vars), ncomp = 10, validation = "CV")
+
+# 3. Re-create your loadings_df (the rest of the plot code is the same)
+y_loadings_df <- as.data.frame(Yloadings(pls_model)[, 1:2])
+colnames(y_loadings_df) <- c("LV1", "LV2")
+y_loadings_df$variable <- rownames(y_loadings_df)
+y_loadings_df$type <- "Element (Y)"
+
+x_loadings_df <- as.data.frame(loadings(pls_model)[, 1:2])
+colnames(x_loadings_df) <- c("LV1", "LV2")
+x_loadings_df$variable <- rownames(x_loadings_df)
+x_loadings_df$type <- "PC (X)"
+
+loadings_df <- rbind(x_loadings_df, y_loadings_df)
+
+# 4. Re-run the plot
+# The points will now be spread out, and the ggrepel warning should go away!
+ggplot(loadings_df, aes(x = LV1, y = LV2, label = variable, color = type)) +
+  geom_point() +
+  geom_text_repel(max.overlaps = 15) + # You might not even need max.overlaps now
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(title = "PLSR Loadings Biplot (Scaled Y-data)") +
+  theme_minimal()
+
+# 5. Re-run your RDA (it will also look correct now)
+rda_model <- rda(Y_vars_scaled ~ ., data = X_vars)
+plot(rda_model, scaling = 2, main = "RDA Triplot (Scaled Y-data)")
+```
+
