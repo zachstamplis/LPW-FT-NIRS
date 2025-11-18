@@ -1,0 +1,1151 @@
+Load Packages & Data
+```{r}
+library(pacman)
+p_load(mdatools, prospectr, tidyverse, stringr, patchwork, gridExtra, cowplot, purrr, viridis, readxl, MuMIn, mgcv, tidyr, future, furrr)
+
+
+df <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS") %>% filter(complete.cases(read_age))
+# combine "Shumagins" and "Kodiak" for region
+df <- df %>%
+  mutate(
+    region = case_when(
+      region %in% c("E Shumagins", "W Shumagins") ~ "Shumagin",
+      region %in% c("N Kodiak", "S Kodiak") ~ "Kodiak",
+      TRUE ~ region
+    )
+  )
+
+kodiak <- df %>% filter(region == "Kodiak")
+shumagin <- df %>% filter(region == "Shumagin")
+lpw <- df %>% filter(region == "LPW")
+```
+
+# Functions
+Things to speed up writing some code....!
+```{r}
+# -------------------------------------------------------------------------- #
+# Data processing
+# -------------------------------------------------------------------------- #
+# Evenly split dataframe based on read_age
+generate_multiple_splits <- function(data, n_splits) {
+  purrr::map(1:n_splits, ~caret::createFolds(data[["read_age"]], k = 10, list = TRUE, returnTrain = FALSE))
+}
+
+# get FT-NIRS wavenumber columns by search for only numerical column names
+find_cols <- function(df){
+  names(df)[grepl("^\\d", names(df))]
+}
+
+# take FT-NIRS dataframe, make it long for plotting
+make_long <- function(df) {
+  speccols <- find_cols(df)
+  df_long <- df %>%
+    tidyr::pivot_longer(cols = speccols) %>%
+    # rename(wavenumber = name) %>%
+    # mutate(wavenumber = as.numeric(as.character(wavenumber)))
+    mutate(name = as.numeric(as.character(name)))
+  return(df_long)
+}
+
+
+# -------------------------------------------------------------------------- #
+# FT-NIRS preprocessing functions: Savitzky-Golay & SNV
+# -------------------------------------------------------------------------- #
+# apply SG filtering to dataframe
+sg_filter <- function(df, m, p, w) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  sg_matrix <- savitzkyGolay(df[, speccols], m = m, p = p, w = w)
+  new_speccols <- find_cols(sg_matrix)
+  names(sg_matrix) <- new_speccols
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(sg_matrix)))
+}
+
+# apply SNV to dataframe
+snv_filter <- function(df){
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  snv_matrix <- prep.snv(as.matrix(df[,speccols]))
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(snv_matrix)))
+}
+
+wave_filter <- function(df, wave){
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  keep_me <- as.numeric(speccols) <= wave
+  speccols_keep <- speccols[keep_me]
+  return(df[, c(metacols, speccols_keep)])
+}
+
+# -------------------------------------------------------------------------- #
+# Model Performance
+# -------------------------------------------------------------------------- #
+# get RPD from model
+calculate_rpd <- function(observed, predicted) { sd(observed) / sqrt(mean((observed - predicted)^2)) }
+# get bias from model
+calculate_bias <- function(observed, predicted) { mean(predicted - observed) }
+
+# -------------------------------------------------------------------------- #
+# Plotting
+# -------------------------------------------------------------------------- #
+spec.fig <- function(df, color) {
+  mydf <- make_long(df)
+  # 1. Quoting to allow column name use later
+  color_col <- rlang::enquo(color) 
+
+  # 2. Sort the data by the grouping variable (specimen) and the x-axis (name)
+  mydf_sorted <- mydf %>% 
+    dplyr::arrange(specimen, name) 
+  
+  # 3. Plot the sorted data
+  ggplot(mydf_sorted) +
+    geom_path(aes(x = name, y = value, color = !!color_col, group = specimen)) +
+    scale_x_reverse() +
+    scale_color_viridis() +
+    labs(y = "Absorbance", x = expression(paste("Wavenumber ", cm^-1))) + 
+    theme_bw(base_size = 16)
+}
+```
+
+# Overall goals
+
+
+I am looking to explore variations in region-specific models.  I have specimens from LPW (eastern GOA), Kodiak (~ central), and Shumagin Islands (~ central but more western) to test various combinations of train/test sets.  
+
+1) First will look at using one region to predict another, with expectations that Kodiak and Shumagin should predict each other fairly well.  LPW specimens are far older than any found in Shumagin/Kodiak so those are a crap shoot.  There are three iterations of this:
+
+- Train: Kodiak, Test: Shumagin & LPW seperately
+- Train: Shumagin, Test: Kodiak * LPW seperately
+- Train: LPW, Test: Kodiak & Shumagin seperately
+
+No 10-fold CV possible here, unless I do an additional internal 10-fold CV test?  Might be worth confirming the models predict themselves well, just like LPW.
+
+2) Explore "combined"/"generalized" models that use specimens from multiple regions.
+
+- Train: Shumagin & Kodiak combined (Wild)
+- Train: Shumagin, Kodiak & LPW combined (ALL Combined)
+
+I hope to determine whether models are best built with only regional specimens or if we can combine multiple regions and still predict fairly well.
+
+# Preprocessing questions
+
+I need to decide how to deal with preprocessing my spectral data.  LPW specimens are 109-205 days old; Shumagin 56-102 days; Kodiak 64-127.  Attempting to predict LPW specimens with the wild is extrapolation and I imagine is going to suck.  The biggest issue is that the spectral signal for wild fish seems "noisier" possibly due to dirty specimens and poorer quality scans, and far lower magnitude (peaks just aren't as large as LPW).  My LPW models worked best using ALL wavenumber and a first order, 3rd polymonial with a windows size of 17 Savitzky-Golay filter.  I need to quickly test a handful of different filters on these regions to see which works best when combining regions.  
+
+I'll start with using a single simple PLS model (and LOOCV for selecting ncomp) to determine which filter works best for each region individually.  Then I'll expand to using 10-fold CV on the same sort of simple LOOCV PLS model with the wild and ALL combined dataframes.  I will collect RPD, Bias, RMSE and R2 from all these models and compare them.
+
+Things to test: 
+
+1) Various SG filters, starting with 1,3,17.  I'll consider smaller/larger windows, as well as 2nd order polynomials (2,3,17?)
+2) SNV normalization (via prep.snv(as.matrix(df)) )
+3) Wavenumber filtering (seems to be best when removing >7500 cm-1 based on previous papers).
+
+
+# Individual region model testing with preprocessing
+```{r}
+# # Function to run a 10-fold CV PLS model from a single region, collecting R2, RMSE, RPD, & Bias from the splits.
+# run_pls <- function(df, num_rounds){
+#   # identify FT-NIRS columns
+#   speccols <- find_cols(df)
+#   
+#   # split dataframe into test and cal dataframes:
+#   test.idx <- generate_multiple_splits(df, num_rounds) # generate test indices for the 10-fold CV with number of rounds we want
+#   cal.idx <- purrr::map(test.idx, ~ {
+#   purrr::map(., ~ setdiff(1:nrow(df), .)) # . is one fold's indices
+# })
+# 
+#   # Run each 10-fold CV:
+#   rounds_results <- purrr::map2_dfr(cal.idx, test.idx, ~{
+#     # .x is a list of 10 cal folds (for this one round)
+#     # .y is a list of 10 test folds (for this one round)
+#     
+#     # 4. Iterate over the folds *within* this round
+#     # We add .id = "fold" to track the fold (1-10)
+#     fold_results <- purrr::map2_dfr(.x, .y, ~{
+#       # .x is now ONE vector of cal indices
+#       # .y is now ONE vector of test indices
+#       
+#       # --- This is your inner model logic, same as before ---
+#       cal_data <- df[.x, ]
+#       test_data <- df[.y, ]
+#       
+#       Xc <- as.matrix(cal_data[, speccols])
+#       Yc <- cal_data$read_age
+#       
+#       Xt <- as.matrix(test_data[, speccols])
+#       Yt <- test_data$read_age
+#       
+#       # Run PLS model with LOOCV to find ncomp
+#       pls_model <- mdatools::pls(x = Xc, y = Yc, cv = 1, x.test = Xt, y.test = Yt, scale = F, center = T)
+#       
+#       # Extract ncomp from LOOCV
+#       ncomp_selected <- pls_model$ncomp.selected
+#       
+# # 1. Create the prediction data frame first
+#       pred_df <- data.frame(
+#         specimen = test_data$specimen, 
+#         obs_age = Yt,
+#         pred_age = pls_model$testres$y.pred[, ncomp_selected, 1]
+#       )
+#       
+#       # 2. Return ONE data.frame with metrics AND the predictions
+#       #    This is now the *last* expression, so it gets returned
+#       data.frame(
+#         ncomp = ncomp_selected,
+#         R2 = pls_model$testres$r2[ncomp_selected],
+#         RMSE = pls_model$testres$rmse[ncomp_selected],
+#         RPD = pls_model$testres$rpd[ncomp_selected],
+#         Bias = pls_model$testres$bias[ncomp_selected],
+#         predictions = I(list(pred_df)) # Nest pred_df in a list-column
+#       )
+#       
+#     }, .id = "fold") # This .id gives you fold 1-10
+#     
+#     return(fold_results) # Return the data frame of 10 folds
+#     
+#   }, .id = "round") # This .id gives you round 1-10
+#   
+#   # Return the final data frame with 100 rows
+#   return(rounds_results)
+# }
+
+```
+
+
+# testing
+```{r}
+# Sys.time()
+# # kodiak
+# results_kodiak <- run_pls(sg_filter(kodiak, 1,3,17), 2)
+# Sys.time()
+# predictions_kodiak <- results_kodiak %>% 
+#   tidyr::unnest(cols = predictions) %>% select(round, fold, specimen, obs_age, pred_age)
+# results_kodiak <- results_kodiak %>% select(-predictions)
+# # summarize across all folds for a given round, average for metrics R2:Bias
+# summary_kodiak <- results_kodiak %>% group_by(round) %>%
+#   summarize(
+#     mean_ncomp = mean(ncomp),
+#     mean_R2 = mean(R2),
+#     mean_RMSE = mean(RMSE),
+#     mean_RPD = mean(RPD),
+#     mean_Bias = mean(Bias)
+#   )
+
+```
+
+# now making it parallel for faster shit
+
+```{r}
+run_pls_parallel <- function(df, num_rounds = 10) {
+  
+  # Identify FT-NIRS columns
+  speccols <- find_cols(df)
+  
+  # 1. Generate all indices (this step is still sequential and fast)
+  test.idx_nested <- generate_multiple_splits(df, num_rounds) 
+  cal.idx_nested <- purrr::map(test.idx_nested, ~ {
+    purrr::map(., ~ setdiff(1:nrow(df), .)) 
+  })
+
+  # 2. "Flatten" the nested lists
+  # This creates two simple lists, each (num_rounds * 10) elements long
+  all_cal_idx <- purrr::flatten(cal.idx_nested)
+  all_test_idx <- purrr::flatten(test.idx_nested)
+  
+  # --- Add 'round' and 'fold' IDs ---
+  # This creates a data frame to track which job is which
+  job_ids <- tidyr::expand_grid(round = 1:num_rounds, fold = 1:10)
+
+  # 3. Run all models in parallel
+  # We use future_map2_dfr to iterate over the two flattened lists
+  all_results <- furrr::future_map2_dfr(
+    all_cal_idx, 
+    all_test_idx, 
+    ~{
+      # .x is one vector of cal indices
+      # .y is one vector of test indices
+      
+      # --- This is your inner model logic, same as before ---
+      cal_data <- df[.x, ]
+      test_data <- df[.y, ]
+      
+      Xc <- as.matrix(cal_data[, speccols])
+      Yc <- cal_data$read_age
+      
+      Xt <- as.matrix(test_data[, speccols])
+      Yt <- test_data$read_age
+      
+      # Run PLS model 
+      pls_model <- mdatools::pls(
+        x = Xc, y = Yc, 
+        cv = 1, 
+        x.test = Xt, y.test = Yt, 
+        scale = FALSE, center = TRUE,
+      )
+      
+      # Extract ncomp from LOOCV
+      ncomp_selected <- pls_model$ncomp.selected
+      
+      # Create the prediction data frame
+      pred_df <- data.frame(
+        specimen = test_data$specimen, 
+        obs_age = Yt,
+        pred_age = pls_model$testres$y.pred[, ncomp_selected, 1]
+      )
+      
+      # Return ONE data.frame with metrics AND the predictions
+      data.frame(
+        ncomp = ncomp_selected,
+        R2 = pls_model$testres$r2[ncomp_selected],
+        RMSE = pls_model$testres$rmse[ncomp_selected],
+        RPD = pls_model$testres$rpd[ncomp_selected],
+        Bias = pls_model$testres$bias[ncomp_selected],
+        predictions = I(list(pred_df)) # Our list-column
+      )
+      
+    }, 
+    # This is critical for reproducible results in parallel
+    .options = furrr_options(seed = TRUE) 
+  )
+  
+  # Combine the job IDs (round, fold) with the results
+  final_results <- dplyr::bind_cols(job_ids, all_results)
+  
+  return(final_results)
+}
+```
+
+# test
+
+```{r}
+# # USE 8 CORES I GUESS, SEEMS TO WORK FAIRLY WELL
+# plan(multisession, workers = 8)
+# 
+# Sys.time()
+# # results_kodiak_parallel <- run_pls_parallel(sg_filter(kodiak, m=1, p=3, w=17), num_rounds = 2)
+# Sys.time()
+# plan(sequential)
+# 
+# predictions_kodiak <- results_kodiak_parallel %>% 
+#   tidyr::unnest(cols = predictions) %>% select(round, fold, specimen, obs_age, pred_age)
+# results_kodiak_parallel <- results_kodiak_parallel %>% select(-predictions)
+# # summarize across all folds for a given round, average for metrics R2:Bias
+# 
+# 
+# summary_kodiak <- results_kodiak_parallel %>%
+#   group_by(round) %>%
+#   summarize(
+#     across(
+#       c(ncomp, R2, RMSE, RPD, Bias), # The columns you want to summarize
+#       mean,                          # The function to apply
+#       .names = "mean_{.col}"         # How to name the new columns
+#     ),
+#     comp_range = paste0(min(ncomp), " - ", max(ncomp))
+#   )
+# 
+# summary_kodiak_expanded <- results_kodiak_parallel %>%
+#   group_by(round) %>%
+#   summarize(
+#     across(
+#       c(ncomp, R2, RMSE, RPD, Bias),
+#       list(mean = mean, sd = sd), # Provide a named list of functions
+#       .names = "{.fn}_{.col}"     # '{.fn}' uses the names from your list
+#     ),
+#     comp_range = paste0(min(ncomp), " - ", max(ncomp))
+#   )
+
+
+
+
+```
+parallel works WAY better, going to use that to identify WHICH version of filtering works best.  
+
+
+
+Okay now run models for each region with the following filters: 
+
+1) Only SG: 1,3,17
+2) Only SNV
+3) SNV FIRST, then SG: 1,3,17
+4) SG: 1,3,17 FIRST, then SNV
+5) remove waves > 7500, then SG 1,3,17
+
+# we'll also try a seperate chunk of models with various SG filters only
+
+1) 1,3,17
+2) 2,3,17,
+3) 1,3,19
+4) 1,3,21
+
+
+# Code to allow me to run a seperate test and calibration dataframe:
+
+```{r}
+# =============================================================================
+#
+# FT-NIRS MODELING FRAMEWORK - SIMPLE TRAIN/TEST SCRIPT
+#
+# This script is designed to run all model types on a *single*
+# calibration (cal_df) and testing (test_df) dataset.
+# It does *not* perform cross-validation and is used to test the
+# core logic, metrics, and outputs before building a larger CV loop.
+#
+# =============================================================================
+
+# --- 1. Load Required Libraries ---
+# Make sure all are loaded in your session
+# library(pacman)
+# p_load(mdatools, prospectr, tidyverse, stringr, purrr, viridis,
+#        mgcv, MuMIn, caret, ranger, xgboost, dplyr)
+
+# =============================================================================
+# --- 2. HELPER FUNCTIONS (Adapted from your Chapter 1 script) ---
+# =============================================================================
+
+# --- A. Metric Calculators ---
+
+# --- C. PCA Importance Helpers ---
+# Gets the PC numbers (e.g., 1, 3, 5) from an lm() model term
+get_pc_indices_lm <- function(term) {
+  as.numeric(stringr::str_extract(attr(term, "term.labels"), "\\d+"))
+}
+
+# Gets the PC numbers from a gam() model formula
+get_pc_indices_gam <- function(formula) {
+  pc_matches <- stringr::str_extract_all(as.character(formula)[3], "PC\\d+")[[1]]
+  as.numeric(stringr::str_extract(pc_matches, "\\d+"))
+}
+
+# Calculates the vector length (importance) for a set of PCs
+calculate_pca_vector_length <- function(pca_rotation, pc_indices) {
+  if (length(pc_indices) == 0 || is.null(pc_indices)) {
+    return(rep(0, nrow(pca_rotation)))
+  }
+  valid_indices <- pc_indices[!is.na(pc_indices)]
+  if (length(valid_indices) == 0) {
+    return(rep(0, nrow(pca_rotation)))
+  }
+  loadings_subset <- pca_rotation[, valid_indices, drop = FALSE]
+  sqrt(rowSums(loadings_subset^2))
+}
+
+
+# =============================================================================
+# --- 3. INDIVIDUAL MODEL RUNNER FUNCTIONS ---
+# =============================================================================
+# Each function takes cal_df and test_df, runs one model type,
+# and returns a list with 3 data frames:
+# $metrics, $predictions, $importance
+
+# --- A. PCA-LM and PCA-GAM Runner ---
+# --- A. PCA-LM and PCA-GAM Runner ---
+run_pca_models <- function(cal_df, test_df, terms_lm, terms_gam) {
+  
+  cli::cli_h1("Running PCA-LM & PCA-GAM Models")
+  spec_cols <- find_cols(cal_df)
+  
+  # 1. Perform PCA on cal_df
+  cli::cli_alert_info("Calculating PCA...")
+  pc.mod <- caret::preProcess(cal_df[, spec_cols],
+                              method = c("center", "pca"),
+                              pcaComp = 10
+  )
+  
+  # Add PC scores to cal and test data
+  cal_pca <- cbind(predict(pc.mod, cal_df[, spec_cols]), cal_df)
+  test_pca <- cbind(predict(pc.mod, test_df[, spec_cols]), test_df)
+  
+  # 2. Run Dredge to find top 10 models for LM and GAM
+  # --- THIS SECTION HAS BEEN REMOVED ---
+  # The dredge logic is now run *before* calling this function.
+  # We are now using the 'terms_lm' and 'terms_gam' arguments passed in.
+  
+  # --- 3. Run LM Models & Get Metrics ---
+  cli::cli_alert_info("Running 10 LM models...")
+  metrics_lm_list <- list()
+  preds_lm_list <- list()
+  importance_lm_list <- list()
+  
+  for (j in 1:10) {
+    mod_name <- paste("PCA-LM", j)
+    mod <- lm(data = cal_pca, terms_lm[[j]])
+    preds <- predict(mod, newdata = test_pca)
+    
+    metrics_lm_list[[j]] <- data.frame(
+      model_type = "PCA-LM",
+      model_name = mod_name,
+      R2 = cor(preds, test_pca$read_age)^2,
+      RMSE = caret::RMSE(pred = preds, obs = test_pca$read_age),
+      RPD = calculate_rpd(test_pca$read_age, preds),
+      Bias = calculate_bias(test_pca$read_age, preds)
+    )
+    
+    preds_lm_list[[j]] <- data.frame(
+      specimen = test_pca$specimen,
+      obs_age = test_pca$read_age,
+      pred_age = preds,
+      model_type = "PCA-LM",
+      model_name = mod_name
+    )
+    
+    pc_indices <- get_pc_indices_lm(terms_lm[[j]])
+    importance_lm_list[[j]] <- data.frame(
+      model_type = "PCA-LM",
+      model_name = mod_name,
+      wavenumber = as.numeric(rownames(pc.mod$rotation)),
+      importance = calculate_pca_vector_length(pc.mod$rotation, pc_indices)
+    )
+  }
+  
+  # --- 4. Run GAM Models & Get Metrics ---
+  cli::cli_alert_info("Running 10 GAM models...")
+  metrics_gam_list <- list()
+  preds_gam_list <- list()
+  importance_gam_list <- list()
+  
+  for (j in 1:10) {
+    mod_name <- paste("PCA-GAM", j)
+    mod <- gam(data = cal_pca, terms_gam[[j]], method = "REML")
+    preds <- predict(mod, newdata = test_pca)
+    
+    metrics_gam_list[[j]] <- data.frame(
+      model_type = "PCA-GAM",
+      model_name = mod_name,
+      R2 = cor(preds, test_pca$read_age)^2,
+      RMSE = caret::RMSE(pred = preds, obs = test_pca$read_age),
+      RPD = calculate_rpd(test_pca$read_age, preds),
+      Bias = calculate_bias(test_pca$read_age, preds)
+    )
+    
+    preds_gam_list[[j]] <- data.frame(
+      specimen = test_pca$specimen,
+      obs_age = test_pca$read_age,
+      pred_age = preds,
+      model_type = "PCA-GAM",
+      model_name = mod_name
+    )
+    
+    pc_indices <- get_pc_indices_gam(terms_gam[[j]])
+    importance_gam_list[[j]] <- data.frame(
+      model_type = "PCA-GAM",
+      model_name = mod_name,
+      wavenumber = as.numeric(rownames(pc.mod$rotation)),
+      importance = calculate_pca_vector_length(pc.mod$rotation, pc_indices)
+    )
+  }
+  
+  # 5. Combine and Return
+  return(list(
+    metrics = bind_rows(metrics_lm_list, metrics_gam_list),
+    predictions = bind_rows(preds_lm_list, preds_gam_list),
+    importance = bind_rows(importance_lm_list, importance_gam_list)
+  ))
+}
+
+# --- B. PLS and PLS-VIP Runner ---
+run_pls_models <- function(cal_df, test_df, vip_threshold = 1.0) {
+  
+  cli::cli_h1("Running PLS & PLS-VIP Models")
+  spec_cols <- find_cols(cal_df)
+  
+  Xc <- as.matrix(cal_df[, spec_cols])
+  Yc <- as.matrix(cal_df$read_age) # <-- FIX: Convert vector to matrix
+  Xt <- as.matrix(test_df[, spec_cols])
+  Yt <- as.matrix(test_df$read_age) # <-- FIX: Convert vector to matrix
+  
+  # --- Model 1: Standard PLS ---
+  cli::cli_alert_info("Running standard PLS with LOOCV...")
+  mod_pls <- mdatools::pls(Xc, Yc,
+                           cv = 1, # LOOCV to find ncomp
+                           scale = FALSE, center = TRUE,
+                           x.test = Xt, y.test = Yt
+  )
+  ncomp_pls <- mod_pls$ncomp.selected
+  
+  # Get VIP scores from this first model
+  vip_scores <- mdatools::vipscores(mod_pls, ncomp = ncomp_pls)
+  
+  # --- Model 2: PLS-VIP ---
+  cli::cli_alert_info(paste("Running PLS-VIP (threshold >", vip_threshold, ")..."))
+  
+  # Find columns to exclude
+  excl_cols_vip <- which(vip_scores < vip_threshold)
+  
+  mod_vip <- mdatools::pls(Xc, Yc,
+                           cv = 1, # LOOCV to find ncomp
+                           scale = FALSE, center = TRUE,
+                           x.test = Xt, y.test = Yt,
+                           exclcols = excl_cols_vip
+  )
+  ncomp_vip <- mod_vip$ncomp.selected
+  
+  # --- 3. Combine Metrics ---
+  metrics <- bind_rows(
+    data.frame(
+      model_type = "PLS",
+      model_name = "PLS",
+      R2 = mod_pls$testres$r2[ncomp_pls],
+      RMSE = mod_pls$testres$rmse[ncomp_pls],
+      RPD = mod_pls$testres$rpd[ncomp_pls],
+      Bias = mod_pls$testres$bias[ncomp_pls]
+    ),
+    data.frame(
+      model_type = "PLS-VIP",
+      model_name = paste0("PLS-VIP (>", vip_threshold, ")"),
+      R2 = mod_vip$testres$r2[ncomp_vip],
+      RMSE = mod_vip$testres$rmse[ncomp_vip],
+      RPD = mod_vip$testres$rpd[ncomp_vip],
+      Bias = mod_vip$testres$bias[ncomp_vip]
+    )
+  )
+  
+  # --- 4. Combine Predictions ---
+  predictions <- bind_rows(
+    data.frame(
+      specimen = test_df$specimen,
+      obs_age = Yt,
+      pred_age = mod_pls$testres$y.pred[, ncomp_pls, 1],
+      model_type = "PLS",
+      model_name = "PLS"
+    ),
+    data.frame(
+      specimen = test_df$specimen,
+      obs_age = Yt,
+      pred_age = mod_vip$testres$y.pred[, ncomp_vip, 1],
+      model_type = "PLS-VIP",
+      model_name = paste0("PLS-VIP (>", vip_threshold, ")")
+    )
+  )
+  
+  # --- 5. Combine Importance ---
+  importance <- data.frame(
+    model_type = "PLS-VIP",
+    model_name = "PLS-VIP", # VIP scores are from the main PLS model
+    wavenumber = as.numeric(colnames(Xc)),
+    importance = as.vector(vip_scores)
+  )
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = importance
+  ))
+}
+
+# --- C. XGBoost Runner ---
+run_xgb_model <- function(cal_df, test_df, best_params_xgb) {
+  
+  cli::cli_h1("Running XGBoost Model")
+  spec_cols <- find_cols(cal_df)
+  
+  # 1. Prepare DMatrix
+  dtrain <- xgb.DMatrix(data = as.matrix(cal_df[, spec_cols]), label = cal_df$read_age)
+  dtest <- xgb.DMatrix(data = as.matrix(test_df[, spec_cols]), label = test_df$read_age)
+  
+  # 2. Set Parameters from your tuning
+  params <- list(
+    objective = "reg:squarederror",
+    booster = "gbtree",
+    nthread = 1,
+    eta = best_params_xgb$eta,
+    max_depth = best_params_xgb$max_depth,
+    min_child_weight = best_params_xgb$min_child_weight,
+    subsample = best_params_xgb$subsample,
+    gamma = best_params_xgb$gamma,
+    colsample_bytree = best_params_xgb$colsample_bytree
+  )
+  best_nrounds <- round(best_params_xgb$mean_nrounds)
+  
+  # 3. Train Model
+  cli::cli_alert_info(paste("Training for", best_nrounds, "rounds..."))
+  mod_xgb <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  
+  # 4. Get Predictions and Metrics
+  preds <- predict(mod_xgb, dtest)
+  obs <- test_df$read_age
+  
+  metrics <- data.frame(
+    model_type = "XGB",
+    model_name = "XGBoost",
+    R2 = cor(preds, obs)^2,
+    RMSE = caret::RMSE(pred = preds, obs = obs),
+    RPD = calculate_rpd(obs, preds),
+    Bias = calculate_bias(obs, preds)
+  )
+  
+  predictions <- data.frame(
+    specimen = test_df$specimen,
+    obs_age = obs,
+    pred_age = preds,
+    model_type = "XGB",
+    model_name = "XGBoost"
+  )
+  
+  # 5. Get Importance
+  imp_matrix <- xgb.importance(model = mod_xgb)
+  imp_df <- data.frame(Feature = colnames(cal_df[, spec_cols])) %>%
+    left_join(imp_matrix, by = "Feature") %>%
+    mutate(
+      model_type = "XGB",
+      model_name = "XGBoost",
+      wavenumber = as.numeric(Feature),
+      importance = ifelse(is.na(Gain), 0, Gain)
+    ) %>%
+    select(model_type, model_name, wavenumber, importance)
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = imp_df
+  ))
+}
+
+# --- D. Random Forest Runner ---
+run_rf_model <- function(cal_df, test_df, best_params_rf) {
+  
+  cli::cli_h1("Running Random Forest Model")
+  spec_cols <- find_cols(cal_df)
+  
+  # 1. Train Model
+  cli::cli_alert_info("Training with ranger...")
+  mod_rf <- ranger(
+    x = cal_df[, spec_cols],
+    y = cal_df$read_age,
+    mtry = best_params_rf$mtry,
+    min.node.size = best_params_rf$min.node.size,
+    splitrule = "variance",
+    importance = 'permutation',
+    num.trees = 1000,
+    num.threads = 1 # Keep single-threaded for simple test
+  )
+  
+  # 2. Get Predictions and Metrics
+  preds <- predict(mod_rf, data = test_df)$predictions
+  obs <- test_df$read_age
+  
+  metrics <- data.frame(
+    model_type = "RF",
+    model_name = "Random Forest",
+    R2 = cor(preds, obs)^2,
+    RMSE = caret::RMSE(pred = preds, obs = obs),
+    RPD = calculate_rpd(obs, preds),
+    Bias = calculate_bias(obs, preds)
+  )
+  
+  predictions <- data.frame(
+    specimen = test_df$specimen,
+    obs_age = obs,
+    pred_age = preds,
+    model_type = "RF",
+    model_name = "Random Forest"
+  )
+  
+  # 3. Get Importance
+  importance <- data.frame(
+    model_type = "RF",
+    model_name = "Random Forest",
+    wavenumber = as.numeric(names(mod_rf$variable.importance)),
+    importance = as.vector(mod_rf$variable.importance)
+  )
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = importance
+  ))
+}
+
+# --- E. Simple Models (Bio-only) Runner ---
+run_simple_models <- function(cal_df, test_df) {
+  
+  cli::cli_h1("Running Simple (Bio-Only) Models")
+  
+  # --- CRITICAL: Filter for complete cases for *these* models ---
+  bio_vars <- c("read_age", "length", "structure_weight")
+  
+  cal_simple <- cal_df[complete.cases(cal_df[, bio_vars]), ]
+  test_simple <- test_df[complete.cases(test_df[, bio_vars]), ]
+  
+  if (nrow(cal_simple) == 0 || nrow(test_simple) == 0) {
+    cli::cli_alert_warning("Skipping simple models: no complete cases for bio-vars.")
+    return(NULL)
+  }
+  
+  cli::cli_alert_info(paste(
+    "Using", nrow(cal_simple), "cal samples and",
+    nrow(test_simple), "test samples."
+  ))
+  
+  # --- Model 1: Simple LM ---
+  mod_lm <- lm(read_age ~ length + structure_weight, data = cal_simple)
+  preds_lm <- predict(mod_lm, newdata = test_simple)
+  obs <- test_simple$read_age
+  
+  metrics_lm <- data.frame(
+    model_type = "Simple",
+    model_name = "Simple-LM (L+SW)",
+    R2 = cor(preds_lm, obs)^2,
+    RMSE = caret::RMSE(pred = preds_lm, obs = obs),
+    RPD = calculate_rpd(obs, preds_lm),
+    Bias = calculate_bias(obs, preds_lm)
+  )
+  
+  preds_lm_df <- data.frame(
+    specimen = test_simple$specimen,
+    obs_age = obs,
+    pred_age = preds_lm,
+    model_type = "Simple",
+    model_name = "Simple-LM (L+SW)"
+  )
+  
+  # --- Model 2: Simple GAM ---
+  mod_gam <- mgcv::gam(read_age ~ s(length, k = 4) + s(structure_weight, k = 4),
+                       data = cal_simple,
+                       method = "REML"
+  )
+  preds_gam <- predict(mod_gam, newdata = test_simple)
+  
+  metrics_gam <- data.frame(
+    model_type = "Simple",
+    model_name = "Simple-GAM (L+SW)",
+    R2 = cor(preds_gam, obs)^2,
+    RMSE = caret::RMSE(pred = preds_gam, obs = obs),
+    RPD = calculate_rpd(obs, preds_gam),
+    Bias = calculate_bias(obs, preds_gam)
+  )
+  
+  preds_gam_df <- data.frame(
+    specimen = test_simple$specimen,
+    obs_age = obs,
+    pred_age = preds_gam,
+    model_type = "Simple",
+    model_name = "Simple-GAM (L+SW)"
+  )
+  
+  # --- 3. Combine and Return ---
+  # No importance for these models
+  return(list(
+    metrics = bind_rows(metrics_lm, metrics_gam),
+    predictions = bind_rows(preds_lm_df, preds_gam_df),
+    importance = data.frame() # Return empty data frame
+  ))
+}
+
+
+# =============================================================================
+# --- 4. MAIN WRAPPER FUNCTION ---
+# =============================================================================
+
+#' Run All Models on a Single Train/Test Split
+#'
+#' This function runs all 5 model types (PCA-LM/GAM, PLS/PLS-VIP,
+#' XGB, RF, and Simple-LM/GAM) on a given calibration and
+#' testing dataset.
+#'
+#' @param cal_df The dataframe for model calibration (training).
+#' @param test_df The dataframe for model testing.
+#' @param best_params_xgb A 1-row data frame with tuned XGBoost params.
+#' @param best_params_rf A 1-row data frame with tuned Random Forest params.
+#' @param vip_threshold The VIP score threshold for the PLS-VIP model.
+#'
+#' @return A list containing three data frames:
+#'         $all_metrics, $all_predictions, $all_importance
+#'
+run_all_models_simple <- function(cal_df, test_df,
+                                  best_params_xgb, best_params_rf,
+                                  terms_lm, terms_gam, # <-- ADDED ARGUMENTS
+                                  vip_threshold = 1.0) {
+  
+  # --- Initialize containers ---
+  metrics_list <- list()
+  predictions_list <- list()
+  importance_list <- list()
+  
+  # --- Run Model Groups ---
+  # Use tryCatch to allow the script to continue if one model fails
+  
+  tryCatch({
+    # Pass the dredge results into the function
+    pca_results <- run_pca_models(cal_df, test_df, terms_lm, terms_gam) # <-- UPDATED CALL
+    metrics_list$pca <- pca_results$metrics
+    predictions_list$pca <- pca_results$predictions
+    importance_list$pca <- pca_results$importance
+  }, error = function(e) { cli::cli_alert_danger("PCA Models FAILED: {e$message}") })
+  
+  tryCatch({
+    pls_results <- run_pls_models(cal_df, test_df, vip_threshold)
+    metrics_list$pls <- pls_results$metrics
+    predictions_list$pls <- pls_results$predictions
+    importance_list$pls <- pls_results$importance
+  }, error = function(e) { cli::cli_alert_danger("PLS Models FAILED: {e$message}") })
+  
+  tryCatch({
+    xgb_results <- run_xgb_model(cal_df, test_df, best_params_xgb)
+    metrics_list$xgb <- xgb_results$metrics
+    predictions_list$xgb <- xgb_results$predictions
+    importance_list$xgb <- xgb_results$importance
+  }, error = function(e) { cli::cli_alert_danger("XGBoost Model FAILED: {e$message}") })
+  
+  tryCatch({
+    rf_results <- run_rf_model(cal_df, test_df, best_params_rf)
+    metrics_list$rf <- rf_results$metrics
+    predictions_list$rf <- rf_results$predictions
+    importance_list$rf <- rf_results$importance
+  }, error = function(e) { cli::cli_alert_danger("Random Forest Model FAILED: {e$message}") })
+  
+  tryCatch({
+    simple_results <- run_simple_models(cal_df, test_df)
+    if (!is.null(simple_results)) {
+      metrics_list$simple <- simple_results$metrics
+      predictions_list$simple <- simple_results$predictions
+      # importance_list$simple is not needed (it's empty)
+    }
+  }, error = function(e) { cli::cli_alert_danger("Simple Models FAILED: {e$message}") })
+  
+  
+  # --- Combine All Results ---
+  cli::cli_h1("Combining All Results")
+  
+  all_metrics <- bind_rows(metrics_list)
+  all_predictions <- bind_rows(predictions_list)
+  all_importance <- bind_rows(importance_list)
+  
+  return(list(
+    all_metrics = all_metrics,
+    all_predictions = all_predictions,
+    all_importance = all_importance
+  ))
+}
+```
+
+
+```{r}
+# =============================================================================
+# --- 5. EXAMPLE USAGE (How to run this script) ---
+# =============================================================================
+
+cal_df <- NULL
+test_df <- NULL
+
+
+
+# --- NEW: Run Dredge Pre-computation (moved from inside the function) ---
+cli::cli_h1("Running Dredge Pre-computation")
+
+# 1. Perform PCA on the *calibration* data
+pca_spec_cols <- find_cols(cal_df)
+dredge_pc.mod <- caret::preProcess(cal_df[, pca_spec_cols],
+                                   method = c("center", "pca"),
+                                   pcaComp = 10
+)
+dredge_cal_pca <- cbind(predict(dredge_pc.mod, cal_df[, pca_spec_cols]), cal_df)
+
+# 2. Create data for dredging
+dredge_model_data <- dredge_cal_pca[, c("read_age", paste0("PC", 1:10))]
+
+# 3. Build global models (with model = TRUE)
+dredge_global_lm <- lm(read_age ~ ., data = dredge_model_data, na.action = "na.fail", model = TRUE)
+dredge_global_gam <- mgcv::gam(
+  data = dredge_model_data,
+  read_age ~ s(PC1, k = 4) + s(PC2, k = 4) + s(PC3, k = 4) + s(PC4, k = 4) + s(PC5, k = 4) +
+    s(PC6, k = 4) + s(PC7, k = 4) + s(PC8, k = 4) + s(PC9, k = 4) + s(PC10, k = 4),
+  na.action = "na.fail",
+  model = TRUE
+)
+
+# 4. Run dredge
+cli::cli_alert_info("Dredging LM... (this may take a moment)")
+suppressMessages({
+  top10_lm_models <- get.models(dredge(dredge_global_lm, trace = FALSE), subset = 1:10)
+})
+cli::cli_alert_info("Dredging GAM... (this may take a moment)")
+suppressMessages({
+  top10_gam_models <- get.models(dredge(dredge_global_gam, trace = FALSE), subset = 1:10)
+})
+
+# 5. Extract terms/formulas to pass to the function
+terms_lm <- lapply(top10_lm_models, function(m) m$terms)
+terms_gam <- lapply(top10_gam_models, function(m) m$formula)
+
+
+# 5. Run the main function
+cli::cli_h1("Running Main Analysis")
+
+simple_test_results <- run_all_models_simple(
+  cal_df = cal_df,
+  test_df = test_df,
+  best_params_xgb = best_xgb_all,
+  best_params_rf = best_rf_all,
+  terms_lm = terms_lm,         # <-- PASS IN DREDGE RESULTS
+  terms_gam = terms_gam,       # <-- PASS IN DREDGE RESULTS
+  vip_threshold = 1.0
+)
+
+# 6. Inspect your results
+cli::cli_h1("Analysis Complete!")
+
+cat("\n--- METRICS ---\n")
+simple_test_results$all_metrics %>% arrange(RMSE)
+
+cat("\n--- PREDICTIONS (head) ---\n")
+print(head(simple_test_results$all_predictions))
+
+cat("\n--- IMPORTANCE (head) ---\n")
+print(head(simple_test_results$all_importance))
+
+
+
+saveRDS(simple_test_results, "Chapter 2/train_kod_test_shu_results.RDS")
+```
+
+
+
+Plot results from above
+
+```{r}
+# PLOT RESULTS QUICKLY
+
+# =============================================================================
+#
+# SCRIPT TO PLOT MODEL RESULTS
+#
+# Assumes an object named 'simple_test_results' exists in your
+# environment, which is the list output from 'run_all_models_simple()'.
+#
+# =============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(patchwork) # For combining plots
+
+# --- 1. Get the data from your results object ---
+importance_df <- simple_test_results$all_importance
+predictions_df <- simple_test_results$all_predictions
+
+
+# =============================================================================
+# --- 2. PLOT 1: VARIABLE IMPORTANCE ---
+# =============================================================================
+
+cli::cli_h1("Generating Importance Plot")
+
+# --- A. Select and normalize data ---
+
+# Select the best PCA-GAM model from your table
+# (PCA-GAM 2 was your #2 best overall)
+models_to_plot_imp <- c(
+  "PLS-VIP",
+  "XGBoost",
+  "Random Forest",
+  "PCA-GAM 2"
+)
+
+# Normalize importance from 0-1 for each method to make them comparable
+importance_to_plot <- importance_df %>%
+  filter(model_name %in% models_to_plot_imp) %>%
+  # Ensure wavenumber is numeric
+  mutate(wavenumber = as.numeric(wavenumber)) %>%
+  # Group by model to scale importance (0-1) *within* each model
+  group_by(model_name) %>%
+  mutate(importance_scaled = (importance - min(importance)) / (max(importance) - min(importance))) %>%
+  ungroup() %>%
+  # Re-order the facets for a logical layout
+  mutate(model_name = factor(model_name, levels = models_to_plot_imp))
+
+
+# --- B. Create the plot ---
+p_importance <- ggplot(importance_to_plot, aes(x = wavenumber, y = importance_scaled, color = model_name)) +
+  geom_line(linewidth = 1) +
+  scale_x_reverse(name = expression(paste("Wavenumber ", cm^-1))) +
+  scale_y_continuous(name = "Normalized Importance (0-1)") +
+  facet_wrap(~model_name, ncol = 1, scales = "free_y") +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold"),
+    strip.background = element_blank()
+  ) +
+  ggtitle("Model Variable Importance")
+
+print(p_importance)
+
+
+# =============================================================================
+# --- 3. PLOT 2: PREDICTIONS (OBSERVED VS. PREDICTED) ---
+# =============================================================================
+
+cli::cli_h1("Generating Prediction Plot")
+
+# --- A. Select models to plot ---
+# (Based on your list and the best performers)
+models_to_plot_pred <- c(
+  "PCA-GAM 2",        # Best GAM
+  "PCA-LM 6",         # Best LM
+  "PLS",
+  "PLS-VIP (>1)",
+  "XGBoost",
+  "Random Forest",
+  "Simple-LM (L+SW)",
+  "Simple-GAM (L+SW)"
+)
+
+# Filter and re-order data
+predictions_to_plot <- predictions_df %>%
+  filter(model_name %in% models_to_plot_pred) %>%
+  mutate(model_name = factor(model_name, levels = models_to_plot_pred))
+
+# --- B. Create the plot ---
+p_predictions <- ggplot(predictions_to_plot, aes(x = obs_age, y = pred_age)) +
+  # 1:1 line
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", linewidth = 1) +
+  # Model trend line
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 0.75) +
+  # Data points
+  geom_point(alpha = 0.6) +
+  # Facet by model
+  facet_wrap(~model_name, ncol = 4) +
+  labs(
+    x = "Observed Age (days)",
+    y = "Predicted Age (days)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", size = 9),
+    strip.background = element_blank()
+  ) +
+  ggtitle("Model Predictions: Observed vs. Predicted")
+
+print(p_predictions)
+
+
+
+
+
+# 1. Get the list of specimens that the simple models were *actually* tested on
+simple_specimens <- predictions_df %>%
+  filter(model_type == "Simple") %>%
+  distinct(specimen)
+
+# 2. Filter ALL model predictions to *only* include those specimens
+fair_comparison_preds <- predictions_df %>%
+  filter(specimen %in% simple_specimens$specimen)
+
+# 3. Now, re-calculate the metrics
+fair_metrics_table <- fair_comparison_preds %>%
+  group_by(model_type, model_name) %>%
+  summarize(
+    RMSE = caret::RMSE(pred = pred_age, obs = obs_age),
+    RPD = calculate_rpd(obs_age, pred_age),
+    Bias = calculate_bias(obs_age, pred_age)
+  ) %>%
+  arrange(RMSE)
+
+# Print the new, fair metrics
+print(fair_metrics_table)
+
+```
+

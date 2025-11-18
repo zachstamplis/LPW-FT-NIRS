@@ -117,30 +117,30 @@ final_plot
 # We specify the plot object explicitly for clarity.
 
 
-
-
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_Raw_vs_Preprocessed_Spectra_", timestamp, ".tiff"), # The name of the file
-  plot = final_plot,                           # The plot object to save
-  device = "tiff",                             # The file format
-  width = 8.5,                                   # Width of the plot in inches
-  height = 6,                                  # Height of the plot in inches
-  dpi = 600,                                   # Resolution in Dots Per Inch
-  compression = "lzw"                          # A good lossless compression
-)
-
+# 
+# 
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_Raw_vs_Preprocessed_Spectra_", timestamp, ".tiff"), # The name of the file
+#   plot = final_plot,                           # The plot object to save
+#   device = "tiff",                             # The file format
+#   width = 8.5,                                   # Width of the plot in inches
+#   height = 6,                                  # Height of the plot in inches
+#   dpi = 600,                                   # Resolution in Dots Per Inch
+#   compression = "lzw"                          # A good lossless compression
+# )
+# 
 
 # --- Alternative: Save as a PNG file ---
 # PNG is also a great option, widely used and good quality.
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_Raw_vs_Preprocessed_Spectra_", timestamp, ".png"),
-  plot = final_plot,
-  device = "png",
-  width = 8.5,
-  height = 6,
-  dpi = 600
-)
-
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_Raw_vs_Preprocessed_Spectra_", timestamp, ".png"),
+#   plot = final_plot,
+#   device = "png",
+#   width = 8.5,
+#   height = 6,
+#   dpi = 600
+# )
+# 
 
 
 
@@ -229,14 +229,14 @@ PCA_outliers <- ggplot(scores_df, aes(x = PC1, y = PC2)) +
 PCA_outliers
 # --- Alternative: Save as a PNG file ---
 # PNG is also a great option, widely used and good quality.
-ggsave(
-  filename = paste0("Chapter 1/", "LPW", "_PCA_outliers_", timestamp, ".png"),
-  plot = PCA_outliers,
-  device = "png",
-  width = 7,
-  height = 6,
-  dpi = 600
-)
+# ggsave(
+#   filename = paste0("Chapter 1/", "LPW", "_PCA_outliers_", timestamp, ".png"),
+#   plot = PCA_outliers,
+#   device = "png",
+#   width = 7,
+#   height = 6,
+#   dpi = 600
+# )
 rm(pca_data_with_na)
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # Figure: AGE READ BIAS PLOTS ####
@@ -401,21 +401,21 @@ combined_ba_plot <- ba_plot_1_2_straight + ba_plot_2_3_straight + ba_plot_1_3_st
 print(combined_ba_plot)
 
 # Save the combined plot to a PNG file
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_ageread_bias_", timestamp, ".png"),  # Desired filename
-  plot = combined_ba_plot,                       # The combined plot object
-  width = 15,                                    # Width in inches (adjust as needed for 3 plots)
-  height = 5,                                    # Height in inches
-  units = "in",                                  # Specify units for width/height
-  dpi = 600                                      # High resolution for publication (300-600 is standard)
-)
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_ageread_bias_", timestamp, ".png"),  # Desired filename
+#   plot = combined_ba_plot,                       # The combined plot object
+#   width = 15,                                    # Width in inches (adjust as needed for 3 plots)
+#   height = 5,                                    # Height in inches
+#   units = "in",                                  # Specify units for width/height
+#   dpi = 600                                      # High resolution for publication (300-600 is standard)
+# )
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # Figure: MODEL PERFORMANCE ####
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+all_results_means <- readRDS("Chapter 1/Newest Run/data/LPW_SUMMARY_all_models_2025-11-17.RDS")
 
-# all_results_means <- readRDS("Model Results/LPW_SUMMARY_all_models_2025-10-31.RDS")
-all_results_means <- readRDS("Chapter 1/LPW_SUMMARY_all_models_2025-10-31.RDS")
+# all_results_means <- readRDS("Chapter 1/Run_10_31_2025/LPW_SUMMARY_all_models_2025-10-31.RDS")
 # Find the single best LM and GAM model from 'all_results_means'
 best_pca_models <- all_results_means %>%
   filter(ModelType %in% c("LM", "GAM")) %>% # filter for GAM and LM only
@@ -550,14 +550,14 @@ composite_plot <- arrangeGrob(
 grid.arrange(composite_plot)
 
 # Save as high-resolution PNG (recommended for Word)
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_model_comparison_boxplots_jittered_", timestamp, ".png"),
-  plot = composite_plot,
-  width = 12,        # Width in inches
-  height = 8,        # Height in inches
-  dpi = 600,         # 600 DPI is publication quality
-  bg = "white"       # White background
-)
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_model_comparison_boxplots_jittered_", timestamp, ".png"),
+#   plot = composite_plot,
+#   width = 12,        # Width in inches
+#   height = 8,        # Height in inches
+#   dpi = 600,         # 600 DPI is publication quality
+#   bg = "white"       # White background
+# )
 
 # unjittered
 
@@ -616,14 +616,14 @@ composite_plot <- arrangeGrob(
 grid.arrange(composite_plot)
 
 # Save as high-resolution PNG (recommended for Word)
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_model_comparison_boxplots_unjittered_", timestamp, ".png"),
-  plot = composite_plot,
-  width = 12,        # Width in inches
-  height = 8,        # Height in inches
-  dpi = 600,         # 600 DPI is publication quality
-  bg = "white"       # White background
-)
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_model_comparison_boxplots_unjittered_", timestamp, ".png"),
+#   plot = composite_plot,
+#   width = 12,        # Width in inches
+#   height = 8,        # Height in inches
+#   dpi = 600,         # 600 DPI is publication quality
+#   bg = "white"       # White background
+# )
 
 
 
@@ -649,8 +649,8 @@ final_method_order_importance <- c(
   "Permutation (RF)"
 )
 
-
-final_importance_data <- readRDS("Chapter 1/LPW_IMPORTANCE_all_models_2025-10-31.RDS")
+final_importance_data <- readRDS("Chapter 1/Newest Run/data/LPW_IMPORTANCE_all_models_2025-11-17.RDS")
+# final_importance_data <- readRDS("Chapter 1/Run_10_31_2025/LPW_IMPORTANCE_all_models_2025-10-31.RDS")
 
 importance_summary <- final_importance_data %>%
   mutate(
@@ -748,16 +748,16 @@ final_plot <- (p1_lm / p2_gam / p3_pls / p4_xgb / p5_rf) &
   scale_x_reverse(expand = expansion(mult = 0, add = 50))
 
 final_plot
-
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_waveimportance_range_", timestamp, ".png"), 
-  plot = final_plot,                              
-  width = 10,                                     
-  height = 12, # <-- Increased height for 5 plots
-  dpi = 600                                      
-)
-
-
+# 
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_waveimportance_range_", timestamp, ".png"),
+#   plot = final_plot,
+#   width = 10,
+#   height = 12, # <-- Increased height for 5 plots
+#   dpi = 600
+# )
+# 
+# 
 
 
 
@@ -899,18 +899,20 @@ final_combined_plot_outline <- (p1_lm_final / p2_gam_final / p3_pls_final / p4_x
 
 print(final_combined_plot_outline)
 
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_waveimportance_overlay_", timestamp, ".png"),
-  plot = final_combined_plot_outline,                              
-  width = 10,                                     
-  height = 12, # <-- Increased height for 5 plots                                    
-  dpi = 600                                      
-)
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_waveimportance_overlay_", timestamp, ".png"),
+#   plot = final_combined_plot_outline,
+#   width = 10,
+#   height = 12, # <-- Increased height for 5 plots
+#   dpi = 600
+# )
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # Figure: Age Predictions ####
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
-all_predictions <- readRDS("Chapter 1/LPW_PREDICTIONS_all_models_2025-10-31.RDS")
+
+all_predictions <- readRDS("Chapter 1/Newest Run/data/LPW_PREDICTIONS_all_models_2025-11-17.RDS")
+# all_predictions <- readRDS("Chapter 1/Run_10_31_2025/LPW_PREDICTIONS_all_models_2025-10-31.RDS")
 
 
 # Define the required constants (assuming they are correctly sourced from elsewhere)
@@ -977,12 +979,49 @@ predictions_for_plot <- all_predictions %>%
 # Calculate the average prediction and residual for each fish (unchanged)
 avg_predictions <- predictions_for_plot %>%
   group_by(specimen_number, Model, ModelType, actual) %>%
-  summarise(avg_predicted_age = mean(predicted, na.rm = TRUE), .groups = 'drop') %>%
+  summarise(avg_predicted_age = median(predicted, na.rm = TRUE), .groups = 'drop') %>%
   mutate(residual = avg_predicted_age - actual)
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 # 3. Create the Final Plot ----#
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+
+# 1:1 line for predictions
+preds_1_1 <- ggplot(avg_predictions, aes(x = actual, y = avg_predicted_age)) +
+  geom_abline(slope = 1, linetype = "dashed", color = "black") +
+  geom_point(aes(color = ModelType), alpha = 0.75, size = 1.5) +
+  # geom_smooth(method = "lm", se = T, color = "#002244", linewidth = 1, alpha = 0.4) +
+  scale_color_manual(values = color_palette, name = "Model Type") +
+  # This will now display all 8 models, including LM
+  facet_wrap(~ Model, ncol = 3) + 
+  labs(
+    x = "Thin Section Age (Days)",
+    y = "Predicted Age (Days)"
+  ) +
+  theme_bw(base_size = 18) +
+  theme(
+    legend.position = "bottom",
+    # Set a negative top margin to pull the legend box closer to the plot panel
+    # The value '-5.5' is an example; adjust as needed.
+    legend.margin = margin(t = -5.5, unit = "pt"),
+    strip.background = element_rect(fill = "gray90")
+  )
+
+
+preds_1_1
+
+ggsave(
+  filename = paste0("Model Results/", "LPW", "_age_predictions_1_1_line", timestamp, ".png"), # Desired file name
+  plot = preds_1_1,                              # The plot object to save
+  width = 8,                                     # Width in inches (adjust as needed)
+  height = 8,                                    # Height in inches (adjust as needed for 4 vertical plots)
+  dpi = 600                                      # High resolution (300 is standard for print)
+)
+
+
+
+
 
 final_plot <- ggplot(avg_predictions, aes(x = actual, y = residual)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
@@ -1007,14 +1046,14 @@ final_plot <- ggplot(avg_predictions, aes(x = actual, y = residual)) +
 
 final_plot
 
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_age_predictions", timestamp, ".png"), # Desired file name
-  plot = final_plot,                              # The plot object to save
-  width = 8,                                     # Width in inches (adjust as needed)
-  height = 8,                                    # Height in inches (adjust as needed for 4 vertical plots)
-  dpi = 600                                      # High resolution (300 is standard for print)
-)
-
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_age_predictions", timestamp, ".png"), # Desired file name
+#   plot = final_plot,                              # The plot object to save
+#   width = 8,                                     # Width in inches (adjust as needed)
+#   height = 8,                                    # Height in inches (adjust as needed for 4 vertical plots)
+#   dpi = 600                                      # High resolution (300 is standard for print)
+# )
+# 
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
@@ -1132,16 +1171,16 @@ hatch <- ggplot(ecdf_differences, aes(x = hatch_date, y = ecdf_difference)) +
 
 
 hatch
-
-ggsave(
-  filename = paste0("Model Results/", "LPW", "_hatch_comparison_", timestamp, ".png"),
-  plot = hatch,
-  width = 12,        # Width in inches
-  height = 8,        # Height in inches
-  dpi = 600,         # 600 DPI is publication quality
-  bg = "white"       # White background
-)
-
+# 
+# ggsave(
+#   filename = paste0("Model Results/", "LPW", "_hatch_comparison_", timestamp, ".png"),
+#   plot = hatch,
+#   width = 12,        # Width in inches
+#   height = 8,        # Height in inches
+#   dpi = 600,         # 600 DPI is publication quality
+#   bg = "white"       # White background
+# )
+# 
 
 
 # --- Clean up environment ---
@@ -1153,101 +1192,101 @@ rm(hatch_estimates, hatch_estimates_cleaned, original_data, ks_results,
 
 
 # --- START: New Hatch Date Density Comparison Plot ---
-message("\n--- Generating Density Plot for 'True Hatch Date' vs 'PLS (VIP)' ---")
-
-# 1. Get the "True" Hatch Dates from the main dataframe
-#    We use 'original_data' which was already created for the KS test
-true_hatch_dates_df <- original_data %>%
-  select(hatch_date = original_hatch_date) %>%
-  filter(!is.na(hatch_date)) %>%
-  mutate(Source = "Thin-Section")
-
-# 2. Get the median *predicted hatch dates* for the "PLS-VIP" model
-#    We use 'hatch_estimates_cleaned' which has the median_hatch
-pls_vip_hatch_preds <- hatch_estimates_cleaned %>%
-  filter(Model == "PLS (VIP)") %>%
-  select(hatch_date = median_hatch) %>%
-  mutate(Source = "FT-NIRS Prediction")
-
-# 3. Combine the two dataframes
-hatch_date_data <- bind_rows(true_hatch_dates_df, pls_vip_hatch_preds) %>%
-  mutate(Source = factor(Source, levels = c("Thin-Section", "FT-NIRS Prediction")))
-
-# 4. --- NEW: Create custom date breaks for 1st and 15th ---
-# Get the date range from the data
-# This assumes hatch_date_data$hatch_date is numeric (days since epoch)
-min_date_numeric <- min(hatch_date_data$hatch_date, na.rm = TRUE)
-max_date_numeric <- max(hatch_date_data$hatch_date, na.rm = TRUE)
-
-# --- FIX: Convert numeric dates back to Date objects for lubridate ---
-# The error occurs because floor_date() needs a Date object, not a number.
-# We assume the numeric is days since the "1970-01-01" origin.
-min_date <- as.Date(min_date_numeric, origin = "1970-01-01")
-max_date <- as.Date(max_date_numeric, origin = "1970-01-01")
-
-# Create a sequence of all days in the full month range
-all_days <- seq(from = floor_date(min_date, "month"), 
-                to = ceiling_date(max_date, "month"), 
-                by = "day")
-
-# Filter for days that are 1 or 15
-custom_date_breaks <- all_days[day(all_days) == 1 | day(all_days) == 15]
-
-# --- FIX: Filter to START from the beginning of the month ---
-# This was filtering from the *actual* min date (e.g., Mar 7)
-# Now it filters from the *start of the month* (e.g., Mar 1)
-custom_date_breaks <- custom_date_breaks[custom_date_breaks >= floor_date(min_date, "month") & 
-                                           custom_date_breaks <= ceiling_date(max_date, "month")]
-
-# If no breaks are found (e.g., very short range), add at least the min and max
-if (length(custom_date_breaks) == 0) {
-  custom_date_breaks <- c(min_date, max_date)
-}
-
-
-# 5. Create the density plot (was step 4)
-hatch_date_comparison_plot <- ggplot(hatch_date_data, aes(x = hatch_date, fill = Source)) +
-  geom_density(alpha = 0.6, position = "identity") +
-  
-  # Format the x-axis to show dates (e.g., "Mar 01")
-  # --- MODIFIED: Use custom date breaks and add limits ---
-  scale_x_date(
-    labels = scales::date_format("%b %d"), 
-    breaks = custom_date_breaks,
-    # Force the axis limits to match the breaks
-    limits = c(min(custom_date_breaks), max(custom_date_breaks)) 
-  ) +
-  
-  scale_fill_manual(values = c("Thin-Section" = "#ca0020", "FT-NIRS Prediction" = "#6ba2c2")) +
-  labs(
-    # title = "Distribution of True vs. PLS (VIP) Estimated Hatch Dates", # Title removed as requested
-    x = "Hatch Date",
-    y = "",
-    fill = "Age Source"
-  ) +
-  theme_bw(base_size = 30) +
-  theme(
-    legend.position = "bottom",
-    # Pull legend closer to x-axis
-    legend.margin = margin(t = -15, unit = "pt"), 
-    # Remove Y-axis text and ticks
-    axis.text.y = element_blank(),
-    axis.ticks.y = element_blank(),
-    # Increase X-axis text size and rotate
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 30) 
-  )
-
-print(hatch_date_comparison_plot)
+# message("\n--- Generating Density Plot for 'True Hatch Date' vs 'PLS (VIP)' ---")
+# 
+# # 1. Get the "True" Hatch Dates from the main dataframe
+# #    We use 'original_data' which was already created for the KS test
+# true_hatch_dates_df <- original_data %>%
+#   select(hatch_date = original_hatch_date) %>%
+#   filter(!is.na(hatch_date)) %>%
+#   mutate(Source = "Thin-Section")
+# 
+# # 2. Get the median *predicted hatch dates* for the "PLS-VIP" model
+# #    We use 'hatch_estimates_cleaned' which has the median_hatch
+# pls_vip_hatch_preds <- hatch_estimates_cleaned %>%
+#   filter(Model == "PLS (VIP)") %>%
+#   select(hatch_date = median_hatch) %>%
+#   mutate(Source = "FT-NIRS Prediction")
+# 
+# # 3. Combine the two dataframes
+# hatch_date_data <- bind_rows(true_hatch_dates_df, pls_vip_hatch_preds) %>%
+#   mutate(Source = factor(Source, levels = c("Thin-Section", "FT-NIRS Prediction")))
+# 
+# # 4. --- NEW: Create custom date breaks for 1st and 15th ---
+# # Get the date range from the data
+# # This assumes hatch_date_data$hatch_date is numeric (days since epoch)
+# min_date_numeric <- min(hatch_date_data$hatch_date, na.rm = TRUE)
+# max_date_numeric <- max(hatch_date_data$hatch_date, na.rm = TRUE)
+# 
+# # --- FIX: Convert numeric dates back to Date objects for lubridate ---
+# # The error occurs because floor_date() needs a Date object, not a number.
+# # We assume the numeric is days since the "1970-01-01" origin.
+# min_date <- as.Date(min_date_numeric, origin = "1970-01-01")
+# max_date <- as.Date(max_date_numeric, origin = "1970-01-01")
+# 
+# # Create a sequence of all days in the full month range
+# all_days <- seq(from = floor_date(min_date, "month"), 
+#                 to = ceiling_date(max_date, "month"), 
+#                 by = "day")
+# 
+# # Filter for days that are 1 or 15
+# custom_date_breaks <- all_days[day(all_days) == 1 | day(all_days) == 15]
+# 
+# # --- FIX: Filter to START from the beginning of the month ---
+# # This was filtering from the *actual* min date (e.g., Mar 7)
+# # Now it filters from the *start of the month* (e.g., Mar 1)
+# custom_date_breaks <- custom_date_breaks[custom_date_breaks >= floor_date(min_date, "month") & 
+#                                            custom_date_breaks <= ceiling_date(max_date, "month")]
+# 
+# # If no breaks are found (e.g., very short range), add at least the min and max
+# if (length(custom_date_breaks) == 0) {
+#   custom_date_breaks <- c(min_date, max_date)
+# }
+# 
+# 
+# # 5. Create the density plot (was step 4)
+# hatch_date_comparison_plot <- ggplot(hatch_date_data, aes(x = hatch_date, fill = Source)) +
+#   geom_density(alpha = 0.6, position = "identity") +
+#   
+#   # Format the x-axis to show dates (e.g., "Mar 01")
+#   # --- MODIFIED: Use custom date breaks and add limits ---
+#   scale_x_date(
+#     labels = scales::date_format("%b %d"), 
+#     breaks = custom_date_breaks,
+#     # Force the axis limits to match the breaks
+#     limits = c(min(custom_date_breaks), max(custom_date_breaks)) 
+#   ) +
+#   
+#   scale_fill_manual(values = c("Thin-Section" = "#ca0020", "FT-NIRS Prediction" = "#6ba2c2")) +
+#   labs(
+#     # title = "Distribution of True vs. PLS (VIP) Estimated Hatch Dates", # Title removed as requested
+#     x = "Hatch Date",
+#     y = "",
+#     fill = "Age Source"
+#   ) +
+#   theme_bw(base_size = 30) +
+#   theme(
+#     legend.position = "bottom",
+#     # Pull legend closer to x-axis
+#     legend.margin = margin(t = -15, unit = "pt"), 
+#     # Remove Y-axis text and ticks
+#     axis.text.y = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     # Increase X-axis text size and rotate
+#     axis.text.x = element_text(angle = 45, hjust = 1, size = 30) 
+#   )
+# 
+# print(hatch_date_comparison_plot)
 
 # 6. Save the plot (was step 5)
-ggsave(
-  filename = paste0("LPW", "_hatch_date_density_comparison_", timestamp, ".png"),
-  plot = hatch_date_comparison_plot,
-  width = 10,
-  height = 7,
-  dpi = 600,
-  bg = "white"
-)
+# ggsave(
+#   filename = paste0("LPW", "_hatch_date_density_comparison_", timestamp, ".png"),
+#   plot = hatch_date_comparison_plot,
+#   width = 10,
+#   height = 7,
+#   dpi = 600,
+#   bg = "white"
+# )
 
 message("\n✅ Hatch date density comparison plot saved.")
 
@@ -1432,5 +1471,71 @@ gtsave(filtered_table_final_bw, paste0("Model Results/", "LPW", "_results_filter
 
 
 # PLS COMPONENTS USED:
-temp <- all_results_means %>% filter(Model == "PLS")
+temp <- all_results_means %>% filter(Model == "PLS - VIP")
 range(temp$Min_Components)
+range(temp$Max_Components)
+
+
+
+# AGE BIAS
+
+agereads <- read.csv("Chapter 1/age_bias_esther.csv")
+names(agereads)
+
+
+
+
+
+
+
+library(readxl)
+library(tidyverse)
+library(FSA)
+library(lubridate) # Helps with date handling
+
+library(FSA)
+library(dplyr)
+
+# 1. Calculate Row Means & Filter
+# We assume your dataframe is named 'agereads'
+data_prep <- agereads %>%
+  rowwise() %>%
+  mutate(
+    # Calculate mean of your 3 potential reads (ignoring NAs)
+    My_Mean = mean(c(y.age1, y.age2, y.age3), na.rm = TRUE),
+    
+    # Calculate mean of expert's potential reads
+    Exp_Mean = mean(c(x.age1, x.age2, x.age3), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  # Filter: Keep only specimens where BOTH you and expert have an age
+  filter(!is.nan(My_Mean) & !is.nan(Exp_Mean))
+
+
+
+
+# 1. Create the ageBias object
+# Formula: NonReference (You) ~ Reference (Expert)
+ab_model <- ageBias(My_Mean ~ Exp_Mean, 
+                    data = data_prep,
+                    ref.lab = "Experienced Reader Age (days)",
+                    nref.lab = "First Author Age (days)")
+
+# 2. Plot using the Campana style
+# 'col.CIsig = "red"' makes the error bar red if you are significantly biased
+# 'show.n = TRUE' puts the sample size number above the x-axis
+plotAB(ab_model,
+       what = "Campana",
+       col.CIsig = "red",
+       pch.mean.sig = 21, # Open circle for biased means (standard convention)
+       show.n = F)
+
+# Calculate precision across ALL columns provided in the formula
+# This will include your replicates and the expert's replicates
+ap_model <- agePrecision(~ y.age1 + y.age2 + y.age3 + x.age1 + x.age2 + x.age3, 
+                         data = data_prep)
+
+# View the summary stats
+# Look for 'ACV' (Average Coefficient of Variation)
+summary(ap_model, what = "precision")
+

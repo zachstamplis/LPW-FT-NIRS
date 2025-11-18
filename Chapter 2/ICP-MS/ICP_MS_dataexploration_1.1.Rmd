@@ -21,7 +21,7 @@ FTNIRS <- FTNIRS %>% filter(region != "LPW")# select only IBM specimensof combin
 speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))]
 metacols <- setdiff(names(FTNIRS), speccols)
 FTNIRS <- cbind(FTNIRS[,metacols],
-             savitzkyGolay(as.matrix(FTNIRS[speccols]), m = 1, p = 3, w = 17)
+             savitzkyGolay(as.matrix(FTNIRS[speccols]), m = 1, p = 5, w = 17)
              )
 speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))] # reselect the FT-NIRS columns
 # perform PCA on all FT-NIRS columns, store alongside specimen
@@ -87,6 +87,8 @@ Y_vars_scaled <- scale(Y_vars)
 
 # investigate regions by element
 
+If my main question is whether FT-NIRS is related to ICP-MS data, this isn't the way to do it....
+
 ```{r}
 # add in `region` information from FT-NIRS df, match by specimen
 ICPMS_region_avg <- ICPMS_region_avg %>% left_join(FTNIRS %>% dplyr::select(specimen, region), by = "specimen")
@@ -106,6 +108,8 @@ ggplot(ICPMS_long, aes(x = oto_region, y = concentration)) +
 
 
 Analysis 1: Linear Model Summary
+
+Same with this. Franz said you'll find spurious relationships by just looking for LM models that match
 ```{r}
 # Get the new, clean Y names
 Y_names <- colnames(Y_vars)

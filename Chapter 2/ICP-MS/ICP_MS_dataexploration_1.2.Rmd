@@ -1,0 +1,364 @@
+# --- 1. Load All Libraries ---
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr) # For str_remove_all
+library(pls)       # For plsr
+library(pheatmap)  # For heatmap
+library(vegan)     # For rda
+library(ggplot2)
+library(ggrepel)
+library(broom)     # For model summaries
+library(purrr)     # For map_dfr
+library(prospectr)
+
+ICPMS <- readRDS(file = "C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/ICPMS_filtered_GOOD_USEME.RDS")
+
+FTNIRS <- readRDS("C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/combined_IBM_LPW_raw.RDS")
+FTNIRS <- FTNIRS %>% filter(region != "LPW")# select only IBM specimensof combined dataframe
+
+# apply savitzky golay 1,5,17 filter
+speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))]
+metacols <- setdiff(names(FTNIRS), speccols)
+FTNIRS <- cbind(FTNIRS[,metacols],
+             savitzkyGolay(as.matrix(FTNIRS[speccols]), m = 1, p = 5, w = 17)
+             )
+speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))] # reselect the FT-NIRS columns
+# perform PCA on all FT-NIRS columns, store alongside specimen
+pca_FTNIRS <- mdatools::pca(FTNIRS[speccols], center = TRUE, scale = TRUE)
+# pca dataframe with first 20 PC's
+pca_df <- data.frame(specimen = FTNIRS$specimen, 
+                     pca_FTNIRS$calres$scores[,1:20])
+# clean up column names
+colnames(pca_df)[2:21] <- paste0("PC", 1:20)
+```
+
+# --- 2. Data Preparation  ---
+```{r}
+
+# Define the *original* column names you want to select
+elements_of_interest <- c(
+  "Mg24_ppm", 
+  "Mn55_ppm", 
+  "Li7_ppm", 
+  "Zn66_ppm", 
+  "Sr88_ppm",  # The one Sr we want
+  "Ba138_ppm"
+)
+
+# Define the *clean* names for the pivot step later
+elements_clean <- c("Mg", "Mn", "Li", "Zn", "Sr", "Ba")
+
+# Create the summary, averaging transects
+ICPMS_region_avg <- ICPMS %>%
+  group_by(specimen, oto_region) %>%
+  summarize(
+    across(all_of(elements_of_interest), \(x) median(x, na.rm = TRUE))
+  ) %>%
+  ungroup() # Always good to ungroup after summarize
+
+# *** THE KEY FIX: Rename columns *before* pivoting ***
+ICPMS_region_avg <- ICPMS_region_avg %>%
+  rename_with(~str_remove_all(.x, "[0-9]+|_ppm"), .cols = all_of(elements_of_interest))
+
+# Pivot wider using the new, clean names
+ICPMS_wide_region <- ICPMS_region_avg %>%
+  pivot_wider(
+    names_from = oto_region,
+    values_from = all_of(elements_clean), # Use the clean names
+    names_sep = "_"                      # Makes "Mg_core", "Mg_middle", etc.
+  )
+
+# Join with PCA data (pca_df)
+# We use na.omit() to ensure all models run
+pca_df_clean <- inner_join(pca_df, ICPMS_wide_region, by = "specimen") %>%
+  na.omit()
+
+# --- 3. Create Final X and Y Variables ---
+X_vars <- pca_df_clean %>% 
+  dplyr::select(starts_with("PC"))
+
+Y_vars <- pca_df_clean %>% 
+  dplyr::select(-specimen, -starts_with("PC")) # Now has clean names
+
+# Create the scaled Y matrix (CRITICAL for PLS, RDA, Heatmap)
+Y_vars_scaled <- scale(Y_vars)
+```
+
+# investigate regions by element
+
+If my main question is whether FT-NIRS is related to ICP-MS data, this isn't the way to do it....
+
+```{r}
+# add in `region` information from FT-NIRS df, match by specimen
+ICPMS_region_avg <- ICPMS_region_avg %>% left_join(FTNIRS %>% dplyr::select(specimen, region), by = "specimen")
+# make ICPMS long for elements for plotting
+ICPMS_long <- ICPMS_region_avg %>% pivot_longer(cols = Mg:Ba, 
+                                 names_to = "element", 
+                                 values_to = "concentration") %>%
+  mutate(element = str_remove_all(element, "[0-9]+|_ppm"))
+
+
+ggplot(ICPMS_long, aes(x = oto_region, y = concentration)) + 
+  geom_boxplot() + 
+  facet_grid(element ~ region , scales = "free_y") +
+  theme_bw()
+```
+
+
+
+Analysis 1: Linear Model Summary
+
+Same with this. Franz said you'll find spurious relationships by just looking for LM models that match
+```{r}
+# Get the new, clean Y names
+Y_names <- colnames(Y_vars)
+pc_names <- colnames(X_vars)
+formula_predictors <- paste(pc_names, collapse = " + ")
+
+# Run the loop
+model_list <- lapply(Y_names, function(chem_name) {
+  full_formula <- as.formula(paste(chem_name, "~", formula_predictors))
+  lm(full_formula, data = pca_df_clean)
+})
+names(model_list) <- Y_names
+
+# Create the clean summary table
+model_summary_table <- map_dfr(model_list, glance, .id = "element_region") %>%
+  dplyr::select(element_region, r.squared, adj.r.squared, sigma, p.value) %>%
+  rename(RSE = sigma) %>%
+  arrange(desc(adj.r.squared))
+
+# Print the clean summary
+print(head(model_summary_table))
+```
+
+Analysis 2: PLSR (PCs vs. Chemistry)
+```{r}
+X_vars_pls <- as.matrix(X_vars)
+
+# Run the PLSR model on scaled Y data
+pls_model <- plsr(Y_vars_scaled ~ X_vars_pls, ncomp = 10, validation = "CV")
+
+# --- Create Loadings DF ---
+y_loadings_df <- as.data.frame(Yloadings(pls_model)[, 1:2]) %>%
+  mutate(variable = rownames(.), type = "Element (Y)") %>%
+  rename(LV1 = `Comp 1`, LV2 = `Comp 2`)
+
+x_loadings_df <- as.data.frame(loadings(pls_model)[, 1:2]) %>%
+  mutate(variable = rownames(.), type = "PC (X)") %>%
+  rename(LV1 = `Comp 1`, LV2 = `Comp 2`)
+
+loadings_df <- rbind(x_loadings_df, y_loadings_df)
+
+# --- Create Biplot (with clean labels) ---
+ggplot(loadings_df, aes(x = LV1, y = LV2, label = variable, color = type)) +
+  geom_point() +
+  geom_text_repel() +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(title = "PLSR Loadings Biplot (Scaled Data)") +
+  theme_minimal()
+```
+
+Analysis 3: Correlation Heatmap
+```{r}
+# Calculate correlation matrix (use scaled Y for better color range)
+cor_matrix <- cor(X_vars, Y_vars_scaled) 
+
+# Create heatmap (with clean labels)
+pheatmap(
+  cor_matrix,
+  main = "Correlation Heatmap (PCs vs. Elements)",
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+)
+```
+
+Analysis 4: RDA (PCs vs. Chemistry)
+```{r}
+# Run RDA on scaled Y data
+rda_model <- rda(Y_vars_scaled ~ ., data = X_vars)
+
+# Plot RDA (with clean labels)
+plot(rda_model, scaling = 2, main = "RDA Triplot (Scaled Data)")
+```
+
+5. Analysis 5: PLSR (Full Spectra vs. Chemistry)
+```{r}
+# Join full FTNIRS data with *clean* ICPMS data
+pls_data_full <- inner_join(FTNIRS, ICPMS_wide_region, by = "specimen")
+
+# Select spectral columns (safer than using indices)
+X_vars_full <- pls_data_full %>% dplyr::select(all_of(speccols))
+X_vars_full <- as.matrix(X_vars_full)
+# Select chemical columns (safer than using indices)
+Y_vars_full <- pls_data_full %>% dplyr::select(all_of(colnames(Y_vars)))
+Y_vars_full_scaled <- scale(Y_vars_full)
+
+# Run the full PLSR model
+pls_model_full <- plsr(Y_vars_full_scaled ~ X_vars_full, 
+                       ncomp = 10, 
+                       validation = "CV")
+# --- Create Loadings DF ---
+y_loadings_df <- as.data.frame(Yloadings(pls_model_full)[, 1:2]) %>%
+  mutate(variable = rownames(.), type = "Element (Y)") %>%
+  rename(LV1 = `Comp 1`, LV2 = `Comp 2`)
+
+x_loadings_df <- as.data.frame(loadings(pls_model_full)[, 1:2]) %>%
+  mutate(variable = rownames(.), type = "PC (X)") %>%
+  rename(LV1 = `Comp 1`, LV2 = `Comp 2`)
+
+loadings_df <- rbind(x_loadings_df, y_loadings_df)
+
+# --- Create Biplot (with clean labels) ---
+ggplot(loadings_df, aes(x = LV1, y = LV2, label = variable, color = type)) +
+  geom_point() +
+  geom_text_repel() +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(title = "PLSR Loadings Biplot (Scaled Data)") +
+  theme_minimal()
+```
+
+# CCA that works
+
+```{r}
+# --- 2a. Load and Prep FT-NIRS Data ---
+# Using the path from your uploaded 'ICP_MS_dataexploration_1.1.Rmd'
+# ‼️ UPDATE THIS PATH if it's incorrect
+ftnirs_path <- "C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/combined_IBM_LPW_raw.RDS"
+if (!file.exists(ftnirs_path)) {
+  stop(paste("FT-NIRS file not found at:", ftnirs_path))
+}
+FTNIRS_raw <- readRDS(ftnirs_path)
+
+# Prepare FTNIRS data (based on your script)
+FTNIRS <- FTNIRS_raw %>% 
+  filter(region != "LPW") # Select only IBM specimens
+
+# Apply Savitzky-Golay filter
+speccols <- names(FTNIRS)[grepl("^\\d", names(FTNIRS))]
+metacols <- setdiff(names(FTNIRS), speccols)
+FTNIRS_processed <- cbind(
+  FTNIRS[, metacols],
+  savitzkyGolay(as.matrix(FTNIRS[speccols]), m = 1, p = 3, w = 17)
+)
+# Ensure specimen is a factor for joining
+FTNIRS_processed$specimen <- as.factor(FTNIRS_processed$specimen)
+speccols <- names(FTNIRS_processed)[grepl("^\\d", names(FTNIRS_processed))]
+cat(paste("Loaded and processed FT-NIRS data for", nrow(FTNIRS_processed), "specimens.\n"))
+
+
+# --- 2b. Load and Prep ICP-MS Data ---
+# We load your 'final_analysis_data' and pivot it to a wide format.
+# This assumes 'final_analysis_data' is in your environment.
+# If not, you must run Part 3 of 'Final_Otolith_Workflow.Rmd' first.
+ICPMS <- readRDS(file = "C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/RDS_dataframes/ICPMS_filtered_GOOD_USEME.RDS")
+
+# Define the *original* column names you want to select
+elements_of_interest <- c(
+  "Mg24_ppm", 
+  "Mn55_ppm", 
+  "Li7_ppm", 
+  "Zn66_ppm", 
+  "Sr88_ppm",  # The one Sr we want
+  "Ba138_ppm"
+)
+
+# Define the *clean* names for the pivot step later
+elements_clean <- c("Mg", "Mn", "Li", "Zn", "Sr", "Ba")
+
+# Create the summary, averaging transects
+ICPMS_region_avg <- ICPMS %>%
+  group_by(specimen, oto_region) %>%
+  summarize(
+    across(all_of(elements_of_interest), \(x) median(x, na.rm = TRUE))
+  ) %>%
+  ungroup() # Always good to ungroup after summarize
+
+# *** THE KEY FIX: Rename columns *before* pivoting ***
+ICPMS_region_avg <- ICPMS_region_avg %>%
+  rename_with(~str_remove_all(.x, "[0-9]+|_ppm"), .cols = all_of(elements_of_interest))
+
+# Pivot wider using the new, clean names
+ICPMS_wide <- ICPMS_region_avg %>%
+  pivot_wider(
+    names_from = oto_region,
+    values_from = all_of(elements_clean), # Use the clean names
+    names_sep = "_"                      # Makes "Mg_core", "Mg_middle", etc.
+  )
+
+
+FTNIRS_processed$specimen <- as.factor(FTNIRS_processed$specimen)
+ICPMS_wide$specimen <- as.factor(ICPMS_wide$specimen)
+# --- 2c. Join Datasets and Create X/Y Matrices ---
+# Join the two datasets by specimen ID
+analysis_data <- inner_join(
+  FTNIRS_processed,
+  ICPMS_wide,
+  by = "specimen"
+)
+
+cat(paste("Joined data: Found", nrow(analysis_data), "matching specimens.\n"))
+
+# Create the two matrices for analysis
+# X = FT-NIRS Spectra (Predictors)
+X_matrix <- analysis_data %>%
+  select(all_of(speccols)) %>%
+  as.matrix()
+
+# Y = ICP-MS Elemental Data (Responses)
+Y_matrix <- analysis_data %>%
+  select(ends_with("_core"), ends_with("_middle"), ends_with("_edge")) %>%
+  as.matrix()
+
+# Scale the Y matrix (highly recommended for both methods)
+Y_matrix_scaled <- scale(Y_matrix)
+
+cat("Created X (FT-NIRS) and Y (ICP-MS) matrices.\n")
+
+# --- 3a. Run PCA on FT-NIRS Data (X) ---
+# Center and scale the spectra
+X_scaled <- scale(X_matrix)
+pca_result <- prcomp(X_scaled)
+
+# Extract the first 10 Principal Components (PCs)
+# This is our new, low-dimension X matrix
+X_pca <- pca_result$x[, 1:10]
+
+# --- 3b. Run Canonical Correlation Analysis (CCA) ---
+# Use the built-in stats::cancor() function
+# It requires Y (ICP-MS) and X (FT-NIRS PCs)
+# It also requires n > p and n > q
+# Our n = ~40, p = 10 (good!), q = ~24 (good!)
+cca_result <- cancor(X_pca, Y_matrix_scaled)
+
+# --- 3c. View Results ---
+cat("--- Canonical Correlation (PCA + CCA) Results ---\n")
+# The 'cor' values are the correlations for each canonical variate.
+# The first value is the most important.
+print(cca_result$cor)
+
+# We can test the significance of these correlations using the 'CCP' package
+# install.packages("CCP")
+library(CCP)
+p.asym(cca_result$cor, 
+       N = nrow(X_pca), 
+       p = ncol(X_pca), 
+       q = ncol(Y_matrix_scaled), 
+       tstat = "Wilks")
+
+
+# --- 3c. View Results ---
+cat("--- Canonical Correlation (PCA + CCA) Results ---\n")
+print(cca_result$cor)
+
+# ‼️ ADD THIS: View the weights for the Y-variables (Elements)
+# This shows which elements are most important for the first (most significant) pair
+cat("\n--- Elemental Loadings for CV1 ---\n")
+cv1_y_loadings <- cca_result$ycoef[, 1]
+print(sort(abs(cv1_y_loadings), decreasing = TRUE))
+
+```
+

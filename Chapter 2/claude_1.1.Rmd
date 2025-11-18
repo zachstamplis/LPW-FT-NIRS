@@ -1,0 +1,2759 @@
+```{r}
+# =============================================================================
+#
+# FT-NIRS AGE PREDICTION - REPEATED 10-FOLD CROSS-VALIDATION FRAMEWORK
+#
+# This script performs repeated 10-fold cross-validation for five model types:
+#   1. PCA-based models (Linear & GAM)
+#   2. Partial Least Squares (PLS & PLS-VIP)
+#   3. XGBoost
+#   4. Random Forest
+#   5. Simple biological models (Length + Structure Weight)
+#
+# The framework uses parallel processing to efficiently run hundreds of CV
+# rounds, aggregating results at the round level to minimize memory usage.
+#
+# =============================================================================
+
+# =============================================================================
+# SECTION 1: SETUP & DATA LOADING
+# =============================================================================
+
+# --- Load Required Packages ---
+library(pacman)
+p_load(
+  arrow,
+  caret,        # Machine learning utilities & preprocessing
+  cowplot,      # Plot arrangements
+  data.table,
+  doParallel,   # Parallel backend
+  doSNOW,       # Parallel progress tracking
+  furrr,        # Parallel mapping with future
+  future,       # Parallel computing framework
+  gridExtra,    # Additional plot utilities
+  mdatools,     # PLS modeling
+  mgcv,         # GAM modeling
+  MuMIn,        # Model selection (dredge)
+  parallel,     # Core parallel utilities
+  patchwork,    # Plot composition
+  prospectr,    # Spectral preprocessing (Savitzky-Golay)
+  purrr,        # Functional programming tools
+  ranger,       # Random Forest implementation
+  readxl,       # Excel file reading
+  stringr,      # String manipulation
+  tidyr,        # Data tidying
+  tidyverse,    # Core tidyverse packages
+  viridis,      # Color scales
+  xgboost       # XGBoost modeling
+)
+
+# --- Load and Prepare Raw Data ---
+df_raw <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS") %>% 
+  filter(complete.cases(read_age))
+
+# Consolidate regional groupings
+df_raw <- df_raw %>%
+  mutate(
+    region = case_when(
+      region %in% c("E Shumagins", "W Shumagins") ~ "Shumagin",
+      region %in% c("N Kodiak", "S Kodiak") ~ "Kodiak",
+      TRUE ~ region
+    )
+  )
+
+# Create region-specific datasets
+kodiak_raw <- df_raw %>% filter(region == "Kodiak")
+shumagin_raw <- df_raw %>% filter(region == "Shumagin")
+lpw_raw <- df_raw %>% filter(region == "LPW")
+
+
+```
+
+```{r}
+
+# =============================================================================
+# SECTION 2: UTILITY FUNCTIONS
+# =============================================================================
+
+# --- 2.1: Data Manipulation Functions ---
+
+#' Find spectral column names
+#' 
+#' Identifies columns containing wavenumber data (numeric column names)
+#' @param df Dataframe containing spectral data
+#' @return Character vector of spectral column names
+find_cols <- function(df) {
+  names(df)[grepl("^\\d", names(df))]
+}
+
+#' Convert spectral data to long format
+#' 
+#' Transforms wide-format spectral data into long format for visualization
+#' @param df Dataframe with spectral columns
+#' @return Long-format dataframe with 'name' (wavenumber) and 'value' columns
+make_long <- function(df) {
+  speccols <- find_cols(df)
+  df_long <- df %>%
+    tidyr::pivot_longer(cols = speccols) %>%
+    mutate(name = as.numeric(as.character(name)))
+  return(df_long)
+}
+
+
+# --- 2.2: Data Splitting Functions ---
+
+#' Generate stratified cross-validation splits
+#' 
+#' Creates multiple sets of 10-fold CV splits, stratified by age and region.
+#' For multi-region data, ensures each fold contains samples from all regions.
+#' For single-region data, reduces to simple age-stratified splits.
+#' 
+#' @param data Full dataset
+#' @param n_splits Number of independent CV repetitions to create
+#' @param strata_col Column name for stratification (default: "read_age")
+#' @param group_col Column name for grouping (default: "region")
+#' @return List of length n_splits, each containing 10 fold index lists
+generate_multiple_splits <- function(data, n_splits,
+                                     strata_col = "read_age",
+                                     group_col = "region") {
+  
+  regions <- unique(data[[group_col]])
+  
+  purrr::map(1:n_splits, function(split_num) {
+    
+    # Create stratified folds within each region
+    region_folds <- purrr::map(regions, function(reg) {
+      region_data <- data[data[[group_col]] == reg, ]
+      region_indices <- which(data[[group_col]] == reg)
+      
+      folds <- caret::createFolds(
+        region_data[[strata_col]],
+        k = 10,
+        list = TRUE,
+        returnTrain = FALSE
+      )
+      
+      # Convert local indices to global indices
+      purrr::map(folds, ~ region_indices[.x])
+    })
+    
+    # Combine corresponding folds across regions
+    # (Fold 1 = Region1_Fold1 + Region2_Fold1 + ...)
+    combined_folds <- purrr::map(1:10, function(fold_num) {
+      unlist(purrr::map(region_folds, fold_num))
+    })
+    
+    names(combined_folds) <- paste0("Fold", sprintf("%02d", 1:10))
+    combined_folds
+  })
+}
+
+
+# --- 2.3: Spectral Preprocessing Functions ---
+
+#' Apply Savitzky-Golay smoothing filter
+#' 
+#' @param df Dataframe with spectral columns
+#' @param m Derivative order (0 = smoothing only, 1 = first derivative, etc.)
+#' @param p Polynomial order
+#' @param w Window size (must be odd)
+#' @return Dataframe with filtered spectral data
+sg_filter <- function(df, m, p, w) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  sg_matrix <- prospectr::savitzkyGolay(df[, speccols], m = m, p = p, w = w)
+  new_speccols <- find_cols(sg_matrix)
+  names(sg_matrix) <- new_speccols
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(sg_matrix)))
+}
+
+#' Apply Standard Normal Variate (SNV) transformation
+#' 
+#' Centers and scales each spectrum to correct for scatter effects
+#' @param df Dataframe with spectral columns
+#' @return Dataframe with SNV-transformed spectral data
+snv_filter <- function(df) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  snv_matrix <- prospectr::prep.snv(as.matrix(df[, speccols]))
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(snv_matrix)))
+}
+
+#' Filter spectral data by wavelength threshold
+#' 
+#' Removes wavenumbers above a specified threshold
+#' @param df Dataframe with spectral columns
+#' @param wave Maximum wavenumber to retain
+#' @return Dataframe with filtered wavelength range
+wave_filter <- function(df, wave) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  keep_me <- as.numeric(speccols) <= wave
+  speccols_keep <- speccols[keep_me]
+  return(df[, c(metacols, speccols_keep)])
+}
+
+
+# --- 2.4: Model Performance Metrics ---
+
+#' Calculate Ratio of Performance to Deviation (RPD)
+#' 
+#' RPD = SD(observed) / RMSE
+#' Higher values indicate better model performance
+calculate_rpd <- function(observed, predicted) {
+  sd(observed) / sqrt(mean((observed - predicted)^2))
+}
+
+#' Calculate prediction bias
+#' 
+#' Bias = mean(predicted - observed)
+#' Positive = over-prediction, Negative = under-prediction
+calculate_bias <- function(observed, predicted) {
+  mean(predicted - observed)
+}
+
+
+# --- 2.5: PCA Helper Functions ---
+
+#' Extract PC indices from linear model terms
+#' 
+#' @param term Terms object from an lm() model
+#' @return Numeric vector of PC indices used in the model
+get_pc_indices_lm <- function(term) {
+  as.numeric(stringr::str_extract(attr(term, "term.labels"), "\\d+"))
+}
+
+#' Extract PC indices from GAM formula
+#' 
+#' @param formula Formula object from a gam() model
+#' @return Numeric vector of PC indices used in the model
+get_pc_indices_gam <- function(formula) {
+  pc_matches <- stringr::str_extract_all(as.character(formula)[3], "PC\\d+")[[1]]
+  as.numeric(stringr::str_extract(pc_matches, "\\d+"))
+}
+
+#' Calculate importance as vector length in PC space
+#' 
+#' For a given set of PCs, calculates the Euclidean length of the loading
+#' vector for each wavenumber. Longer vectors = more important wavenumbers.
+#' 
+#' @param pca_rotation PCA rotation matrix (loadings)
+#' @param pc_indices Which PCs to include in calculation
+#' @return Numeric vector of importance scores (one per wavenumber)
+calculate_pca_vector_length <- function(pca_rotation, pc_indices) {
+  if (length(pc_indices) == 0 || is.null(pc_indices)) {
+    return(rep(0, nrow(pca_rotation)))
+  }
+  valid_indices <- pc_indices[!is.na(pc_indices)]
+  if (length(valid_indices) == 0) {
+    return(rep(0, nrow(pca_rotation)))
+  }
+  loadings_subset <- pca_rotation[, valid_indices, drop = FALSE]
+  sqrt(rowSums(loadings_subset^2))
+}
+
+
+# --- 2.6: Result Aggregation Functions ---
+
+#' Summarize variable importance by CV round
+#' 
+#' Aggregates importance values across 10 folds within each round,
+#' reducing memory usage by ~10x while preserving key statistics
+#' 
+#' @param importance_df Raw importance data with round and fold columns
+#' @return Summarized dataframe with mean and SD per round
+summarize_importance_by_round <- function(importance_df) {
+  importance_df %>%
+    group_by(model_type, model_name, wavenumber, round) %>%
+    summarize(
+      importance_mean = mean(importance, na.rm = TRUE),
+      importance_sd = sd(importance, na.rm = TRUE),
+      n_folds = n(),
+      .groups = "drop"
+    )
+}
+
+
+# --- 2.7: Visualization Functions ---
+
+#' Create spectral plot
+#' 
+#' Generates a line plot of absorbance vs wavenumber for multiple specimens
+#' @param df Dataframe with spectral data
+#' @param color Column name (unquoted) to use for coloring lines
+#' @return ggplot object
+spec.fig <- function(df, color) {
+  mydf <- make_long(df)
+  color_col <- rlang::enquo(color) 
+  
+  mydf_sorted <- mydf %>% 
+    dplyr::arrange(specimen, name) 
+  
+  ggplot(mydf_sorted) +
+    geom_path(aes(x = name, y = value, color = !!color_col, group = specimen)) +
+    scale_x_reverse() +
+    scale_color_viridis() +
+    labs(y = "Absorbance", x = expression(paste("Wavenumber ", cm^-1))) + 
+    theme_bw(base_size = 16)
+}
+
+
+```
+
+
+```{r}
+# =============================================================================
+# SECTION 3: INDIVIDUAL MODEL RUNNER FUNCTIONS
+# =============================================================================
+# Each function fits one model type to calibration data and evaluates on test data
+# All functions return a list with: metrics, predictions, and importance (if applicable)
+
+# --- 3.1: PCA-Based Models (LM & GAM) ---
+
+#' Run PCA-based linear and GAM models
+#' 
+#' Fits 10 pre-selected LM models and 10 pre-selected GAM models on PC scores
+#' 
+#' @param cal_df Calibration data
+#' @param test_df Test data  
+#' @param terms_lm List of 10 formula terms for linear models
+#' @param terms_gam List of 10 formulas for GAM models
+#' @return List containing metrics, predictions, and importance dataframes
+run_pca_models <- function(cal_df, test_df, terms_lm, terms_gam) {
+  spec_cols <- find_cols(cal_df)
+  
+  # Perform PCA on calibration data
+  pc.mod <- caret::preProcess(
+    cal_df[, spec_cols],
+    method = c("center", "pca"),
+    pcaComp = 10
+  )
+  
+  # Transform both datasets to PC space
+  cal_pca <- cbind(predict(pc.mod, cal_df[, spec_cols]), cal_df)
+  test_pca <- cbind(predict(pc.mod, test_df[, spec_cols]), test_df)
+  
+  # --- Fit 10 Linear Models ---
+  metrics_lm_list <- list()
+  preds_lm_list <- list()
+  importance_lm_list <- list()
+  
+  for (j in 1:10) {
+    mod_name <- paste("PCA-LM", j)
+    mod <- lm(data = cal_pca, terms_lm[[j]])
+    preds <- predict(mod, newdata = test_pca)
+    
+    # Store metrics
+    metrics_lm_list[[j]] <- data.frame(
+      model_type = "PCA-LM",
+      model_name = mod_name,
+      R2 = 1 - (sum((test_pca$read_age - preds)^2) / 
+                  sum((test_pca$read_age - mean(test_pca$read_age))^2)),
+      RMSE = caret::RMSE(pred = preds, obs = test_pca$read_age),
+      RPD = calculate_rpd(test_pca$read_age, preds),
+      Bias = calculate_bias(test_pca$read_age, preds)
+    )
+    
+    # Store predictions
+    preds_lm_list[[j]] <- data.frame(
+      specimen = test_pca$specimen,
+      obs_age = test_pca$read_age,
+      pred_age = preds,
+      model_type = "PCA-LM",
+      model_name = mod_name
+    )
+    
+    # Calculate importance based on PC loadings
+    pc_indices <- get_pc_indices_lm(terms_lm[[j]])
+    importance_lm_list[[j]] <- data.frame(
+      model_type = "PCA-LM",
+      model_name = mod_name,
+      wavenumber = as.numeric(rownames(pc.mod$rotation)),
+      importance = calculate_pca_vector_length(pc.mod$rotation, pc_indices)
+    )
+  }
+  
+  # --- Fit 10 GAM Models ---
+  metrics_gam_list <- list()
+  preds_gam_list <- list()
+  importance_gam_list <- list()
+  
+  for (j in 1:10) {
+    mod_name <- paste("PCA-GAM", j)
+    mod <- mgcv::gam(data = cal_pca, terms_gam[[j]], method = "REML")
+    preds <- predict(mod, newdata = test_pca)
+    
+    metrics_gam_list[[j]] <- data.frame(
+      model_type = "PCA-GAM",
+      model_name = mod_name,
+      R2 = 1 - (sum((test_pca$read_age - preds)^2) / 
+                  sum((test_pca$read_age - mean(test_pca$read_age))^2)),
+      RMSE = caret::RMSE(pred = preds, obs = test_pca$read_age),
+      RPD = calculate_rpd(test_pca$read_age, preds),
+      Bias = calculate_bias(test_pca$read_age, preds)
+    )
+    
+    preds_gam_list[[j]] <- data.frame(
+      specimen = test_pca$specimen,
+      obs_age = test_pca$read_age,
+      pred_age = preds,
+      model_type = "PCA-GAM",
+      model_name = mod_name
+    )
+    
+    pc_indices <- get_pc_indices_gam(terms_gam[[j]])
+    importance_gam_list[[j]] <- data.frame(
+      model_type = "PCA-GAM",
+      model_name = mod_name,
+      wavenumber = as.numeric(rownames(pc.mod$rotation)),
+      importance = calculate_pca_vector_length(pc.mod$rotation, pc_indices)
+    )
+  }
+  
+  # Combine all results
+  return(list(
+    metrics = bind_rows(metrics_lm_list, metrics_gam_list),
+    predictions = bind_rows(preds_lm_list, preds_gam_list),
+    importance = bind_rows(importance_lm_list, importance_gam_list)
+  ))
+}
+
+
+# --- 3.2: PLS Models (Standard & VIP-Selected) ---
+
+#' Run PLS and PLS-VIP models
+#' 
+#' Fits two PLS models: (1) standard PLS, (2) PLS with VIP variable selection
+#' 
+#' @param cal_df Calibration data
+#' @param test_df Test data
+#' @param vip_threshold VIP score threshold for variable selection (default: 1.0)
+#' @return List containing metrics, predictions, and importance dataframes
+run_pls_models <- function(cal_df, test_df, vip_threshold = 1.0) {
+  spec_cols <- find_cols(cal_df)
+  
+  Xc <- as.matrix(cal_df[, spec_cols])
+  Yc <- as.matrix(cal_df$read_age)
+  Xt <- as.matrix(test_df[, spec_cols])
+  Yt <- as.matrix(test_df$read_age)
+  
+  # --- Model 1: Standard PLS ---
+  mod_pls <- mdatools::pls(
+    Xc, Yc,
+    cv = 1,  # LOOCV for component selection
+    scale = FALSE,
+    center = TRUE,
+    x.test = Xt,
+    y.test = Yt
+  )
+  ncomp_pls <- mod_pls$ncomp.selected
+  vip_scores <- mdatools::vipscores(mod_pls, ncomp = ncomp_pls)
+  
+  # --- Model 2: PLS with VIP Selection ---
+  excl_cols_vip <- which(vip_scores < vip_threshold)
+  
+  mod_vip <- mdatools::pls(
+    Xc, Yc,
+    cv = 1,
+    scale = FALSE,
+    center = TRUE,
+    x.test = Xt,
+    y.test = Yt,
+    exclcols = excl_cols_vip
+  )
+  ncomp_vip <- mod_vip$ncomp.selected
+  
+  # Compile results
+  metrics <- bind_rows(
+    data.frame(
+      model_type = "PLS",
+      model_name = "PLS",
+      R2 = mod_pls$testres$r2[ncomp_pls],
+      RMSE = mod_pls$testres$rmse[ncomp_pls],
+      RPD = mod_pls$testres$rpd[ncomp_pls],
+      Bias = mod_pls$testres$bias[ncomp_pls]
+    ),
+    data.frame(
+      model_type = "PLS-VIP",
+      model_name = paste0("PLS-VIP (>", vip_threshold, ")"),
+      R2 = mod_vip$testres$r2[ncomp_vip],
+      RMSE = mod_vip$testres$rmse[ncomp_vip],
+      RPD = mod_vip$testres$rpd[ncomp_vip],
+      Bias = mod_vip$testres$bias[ncomp_vip]
+    )
+  )
+  
+  predictions <- bind_rows(
+    data.frame(
+      specimen = test_df$specimen,
+      obs_age = Yt,
+      pred_age = mod_pls$testres$y.pred[, ncomp_pls, 1],
+      model_type = "PLS",
+      model_name = "PLS"
+    ),
+    data.frame(
+      specimen = test_df$specimen,
+      obs_age = Yt,
+      pred_age = mod_vip$testres$y.pred[, ncomp_vip, 1],
+      model_type = "PLS-VIP",
+      model_name = paste0("PLS-VIP (>", vip_threshold, ")")
+    )
+  )
+  
+  importance <- data.frame(
+    model_type = "PLS-VIP",
+    model_name = "PLS-VIP",
+    wavenumber = as.numeric(colnames(Xc)),
+    importance = as.vector(vip_scores)
+  )
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = importance
+  ))
+}
+
+
+# --- 3.3: XGBoost Model ---
+
+#' Run XGBoost gradient boosting model
+#' 
+#' Uses pre-tuned hyperparameters to fit an XGBoost regression model
+#' 
+#' @param cal_df Calibration data
+#' @param test_df Test data
+#' @param best_params_xgb Dataframe with tuned hyperparameters
+#' @return List containing metrics, predictions, and importance dataframes
+run_xgb_model <- function(cal_df, test_df, best_params_xgb) {
+  spec_cols <- find_cols(cal_df)
+  
+  # Prepare DMatrix objects
+  dtrain <- xgb.DMatrix(
+    data = as.matrix(cal_df[, spec_cols]),
+    label = cal_df$read_age
+  )
+  dtest <- xgb.DMatrix(
+    data = as.matrix(test_df[, spec_cols]),
+    label = test_df$read_age
+  )
+  
+  # Set model parameters from pre-tuned values
+  params <- list(
+    objective = "reg:squarederror",
+    booster = "gbtree",
+    nthread = 1,
+    eta = best_params_xgb$eta,
+    max_depth = best_params_xgb$max_depth,
+    min_child_weight = best_params_xgb$min_child_weight,
+    subsample = best_params_xgb$subsample,
+    gamma = best_params_xgb$gamma,
+    colsample_bytree = best_params_xgb$colsample_bytree
+  )
+  best_nrounds <- round(best_params_xgb$mean_nrounds)
+  
+  # Train model
+  mod_xgb <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  
+  # Generate predictions
+  preds <- predict(mod_xgb, dtest)
+  obs <- test_df$read_age
+  
+  RSS <- sum((obs - preds)^2)
+  TSS <- sum((obs - mean(obs))^2)
+  
+  metrics <- data.frame(
+    model_type = "XGB", model_name = "XGBoost",
+    R2 = 1 - (RSS / TSS),  # <-- CORRECTED
+    RMSE = caret::RMSE(pred = preds, obs = obs),
+    RPD = calculate_rpd(obs, preds), 
+    Bias = calculate_bias(obs, preds)
+  )
+  
+  predictions <- data.frame(
+    specimen = test_df$specimen,
+    obs_age = obs,
+    pred_age = preds,
+    model_type = "XGB",
+    model_name = "XGBoost"
+  )
+  
+  # Extract feature importance (Gain)
+  imp_matrix <- xgb.importance(model = mod_xgb)
+  imp_df <- data.frame(Feature = colnames(cal_df[, spec_cols])) %>%
+    left_join(imp_matrix, by = "Feature") %>%
+    mutate(
+      model_type = "XGB",
+      model_name = "XGBoost",
+      wavenumber = as.numeric(Feature),
+      importance = ifelse(is.na(Gain), 0, Gain)
+    ) %>%
+    select(model_type, model_name, wavenumber, importance)
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = imp_df
+  ))
+}
+
+
+# --- 3.4: Random Forest Model ---
+
+#' Run Random Forest regression model
+#' 
+#' Uses pre-tuned hyperparameters to fit a ranger Random Forest model
+#' 
+#' @param cal_df Calibration data
+#' @param test_df Test data
+#' @param best_params_rf Dataframe with tuned hyperparameters
+#' @return List containing metrics, predictions, and importance dataframes
+run_rf_model <- function(cal_df, test_df, best_params_rf) {
+  spec_cols <- find_cols(cal_df)
+  
+  # Train Random Forest
+  mod_rf <- ranger::ranger(
+    x = cal_df[, spec_cols],
+    y = cal_df$read_age,
+    mtry = best_params_rf$mtry,
+    min.node.size = best_params_rf$min.node.size,
+    splitrule = "variance",
+    importance = 'permutation',
+    num.trees = 1000,
+    num.threads = 1
+  )
+  
+  # Generate predictions
+  preds <- predict(mod_rf, data = test_df)$predictions
+  obs <- test_df$read_age
+  
+  
+  RSS <- sum((obs - preds)^2)
+  TSS <- sum((obs - mean(obs))^2)
+  
+  metrics <- data.frame(
+    model_type = "RF", model_name = "Random Forest",
+    R2 = 1 - (RSS / TSS), # <-- CORRECTED
+    RMSE = caret::RMSE(pred = preds, obs = obs),
+    RPD = calculate_rpd(obs, preds), 
+    Bias = calculate_bias(obs, preds)
+  )
+  
+  predictions <- data.frame(
+    specimen = test_df$specimen,
+    obs_age = obs,
+    pred_age = preds,
+    model_type = "RF",
+    model_name = "Random Forest"
+  )
+  
+  importance <- data.frame(
+    model_type = "RF",
+    model_name = "Random Forest",
+    wavenumber = as.numeric(names(mod_rf$variable.importance)),
+    importance = as.vector(mod_rf$variable.importance)
+  )
+  
+  return(list(
+    metrics = metrics,
+    predictions = predictions,
+    importance = importance
+  ))
+}
+
+
+# --- 3.5: Simple Biological Models ---
+
+#' Run simple models using only biological measurements
+#' 
+#' Fits linear and GAM models using length and structure weight only
+#' (no spectral data). Useful as baseline comparison models.
+#' 
+#' @param cal_df Calibration data
+#' @param test_df Test data
+#' @return List containing metrics and predictions (no importance)
+run_simple_models <- function(cal_df, test_df) {
+  bio_vars <- c("read_age", "length", "structure_weight")
+  
+  # Remove rows with missing biological data
+  cal_simple <- cal_df[complete.cases(cal_df[, bio_vars]), ]
+  test_simple <- test_df[complete.cases(test_df[, bio_vars]), ]
+  
+  if (nrow(cal_simple) == 0 || nrow(test_simple) == 0) {
+    return(NULL)
+  }
+  
+  # --- Model 1: Simple Linear Model ---
+  mod_lm <- lm(read_age ~ length + structure_weight, data = cal_simple)
+  preds_lm <- predict(mod_lm, newdata = test_simple)
+  obs <- test_simple$read_age
+  
+  
+  RSS_lm <- sum((obs - preds_lm)^2)
+  TSS_lm <- sum((obs - mean(obs))^2)
+  
+  metrics_lm <- data.frame(
+    model_type = "Simple", model_name = "Simple-LM (L+SW)",
+    R2 = 1 - (RSS_lm / TSS_lm), # <-- CORRECTED
+    RMSE = caret::RMSE(pred = preds_lm, obs = obs), # <-- ADDED RMSE
+    RPD = calculate_rpd(obs, preds_lm), 
+    Bias = calculate_bias(obs, preds_lm)
+  )
+  
+  preds_lm_df <- data.frame(
+    specimen = test_simple$specimen,
+    obs_age = obs,
+    pred_age = preds_lm,
+    model_type = "Simple",
+    model_name = "Simple-LM (L+SW)"
+  )
+  
+  # --- Model 2: Simple GAM ---
+  mod_gam <- mgcv::gam(
+    read_age ~ s(length, k = 4) + s(structure_weight, k = 4),
+    data = cal_simple,
+    method = "REML"
+  )
+  preds_gam <- predict(mod_gam, newdata = test_simple)
+  
+  
+  
+   RSS_gam <- sum((obs - preds_gam)^2)
+   TSS_gam <- sum((obs - mean(obs))^2)
+  
+  metrics_gam <- data.frame(
+    model_type = "Simple", model_name = "Simple-GAM (L+SW)",
+    R2 = 1 - (RSS_gam / TSS_gam), # <-- CORRECTED
+    RMSE = caret::RMSE(pred = preds_gam, obs = obs),
+    RPD = calculate_rpd(obs, preds_gam), 
+    Bias = calculate_bias(obs, preds_gam)
+  )
+  
+  preds_gam_df <- data.frame(
+    specimen = test_simple$specimen,
+    obs_age = obs,
+    pred_age = preds_gam,
+    model_type = "Simple",
+    model_name = "Simple-GAM (L+SW)"
+  )
+  
+  return(list(
+    metrics = bind_rows(metrics_lm, metrics_gam),
+    predictions = bind_rows(preds_lm_df, preds_gam_df),
+    importance = data.frame()  # No importance for simple models
+  ))
+}
+
+```
+
+
+
+```{r}
+# =============================================================================
+# SECTION 4: CROSS-VALIDATION WORKER FUNCTIONS
+# =============================================================================
+
+# --- 4.1: Single Fold Worker ---
+
+#' Run all models for a single CV fold
+#' 
+#' Worker function that fits all 5 model types on one train/test split.
+#' Called repeatedly within each CV round.
+#' 
+#' @param cal_indices Row indices for calibration set
+#' @param test_indices Row indices for test set
+#' @param full_df Complete dataset
+#' @param terms_lm Pre-selected LM model formulas
+#' @param terms_gam Pre-selected GAM model formulas
+#' @param best_params_xgb Tuned XGBoost parameters
+#' @param best_params_rf Tuned Random Forest parameters
+#' @param vip_threshold VIP score cutoff for PLS variable selection
+#' @return List with metrics, predictions, and importance for all models
+run_all_models_for_fold <- function(cal_indices, test_indices,
+                                    full_df,
+                                    terms_lm, terms_gam,
+                                    best_params_xgb, best_params_rf,
+                                    vip_threshold = 1.0) {
+  
+  # Subset data for this fold
+  cal_df <- full_df[cal_indices, ]
+  test_df <- full_df[test_indices, ]
+  
+  # Initialize result containers
+  metrics_list <- list()
+  predictions_list <- list()
+  importance_list <- list()
+  
+  # Run each model type with error handling
+  tryCatch({
+    pca_results <- run_pca_models(cal_df, test_df, terms_lm, terms_gam)
+    metrics_list$pca <- pca_results$metrics
+    predictions_list$pca <- pca_results$predictions
+    importance_list$pca <- pca_results$importance
+  }, error = function(e) {
+    message("PCA Models FAILED for a fold: ", e$message)
+  })
+  
+  tryCatch({
+    pls_results <- run_pls_models(cal_df, test_df, vip_threshold)
+    metrics_list$pls <- pls_results$metrics
+    predictions_list$pls <- pls_results$predictions
+    importance_list$pls <- pls_results$importance
+  }, error = function(e) {
+    message("PLS Models FAILED for a fold: ", e$message)
+  })
+  
+  tryCatch({
+    xgb_results <- run_xgb_model(cal_df, test_df, best_params_xgb)
+    metrics_list$xgb <- xgb_results$metrics
+    predictions_list$xgb <- xgb_results$predictions
+    importance_list$xgb <- xgb_results$importance
+  }, error = function(e) {
+    message("XGBoost Model FAILED for a fold: ", e$message)
+  })
+  
+  tryCatch({
+    rf_results <- run_rf_model(cal_df, test_df, best_params_rf)
+    metrics_list$rf <- rf_results$metrics
+    predictions_list$rf <- rf_results$predictions
+    importance_list$rf <- rf_results$importance
+  }, error = function(e) {
+    message("Random Forest Model FAILED for a fold: ", e$message)
+  })
+  
+  tryCatch({
+    simple_results <- run_simple_models(cal_df, test_df)
+    if (!is.null(simple_results)) {
+      metrics_list$simple <- simple_results$metrics
+      predictions_list$simple <- simple_results$predictions
+    }
+  }, error = function(e) {
+    message("Simple Models FAILED for a fold: ", e$message)
+  })
+  
+  # Combine all results for this fold
+  all_metrics <- bind_rows(metrics_list)
+  all_predictions <- bind_rows(predictions_list)
+  all_importance <- bind_rows(importance_list)
+  
+  return(list(
+    metrics = all_metrics,
+    predictions = all_predictions,
+    importance = all_importance
+  ))
+}
+
+
+# --- 4.2: Round-Level Worker (Memory-Efficient Aggregation) ---
+
+#' Process one complete CV round (10 folds)
+#' 
+#' Runs all 10 folds for a single round sequentially, then aggregates
+#' the results BEFORE returning. This is the key memory-saving step:
+#' instead of returning 10 large result objects, we return 3 small summaries.
+#' 
+#' @param round_num The current round number (for tracking)
+#' @param test_folds_for_this_round List of 10 test index vectors
+#' @param cal_folds_for_this_round List of 10 calibration index vectors
+#' @param full_df Complete dataset
+#' @param terms_lm Pre-selected LM model formulas
+#' @param terms_gam Pre-selected GAM model formulas
+#' @param best_params_xgb Tuned XGBoost parameters
+#' @param best_params_rf Tuned Random Forest parameters
+#' @param vip_threshold VIP score cutoff for PLS variable selection
+#' @return List with aggregated metrics_summary, importance_summary, and raw predictions
+# UPDATED: Keep predictions but make them more memory-efficient
+
+process_one_round <- function(round_num,
+                              test_folds_for_this_round,
+                              cal_folds_for_this_round,
+                              full_df,
+                              terms_lm, terms_gam,
+                              best_params_xgb, best_params_rf,
+                              vip_threshold = 1.0,
+                              save_path = "temp_arrow") { # <-- save_path is the PARENT dir
+
+  # --- Step 1: Run all 10 folds sequentially ---
+  fold_results_list <- purrr::map(1:10, function(fold_num) {
+    run_all_models_for_fold(
+      cal_indices = cal_folds_for_this_round[[fold_num]],
+      test_indices = test_folds_for_this_round[[fold_num]],
+      full_df = full_df,
+      terms_lm = terms_lm,
+      terms_gam = terms_gam,
+      best_params_xgb = best_params_xgb,
+      best_params_rf = best_params_rf,
+      vip_threshold = vip_threshold
+    )
+  })
+
+  # --- Step 2: Aggregate metrics (average across 10 folds) ---
+  metrics_summary <- purrr::map_dfr(fold_results_list, "metrics") %>%
+    group_by(model_type, model_name) %>%
+    summarize(
+      R2 = mean(R2, na.rm = TRUE),
+      RMSE = mean(RMSE, na.rm = TRUE),
+      RPD = mean(RPD, na.rm = TRUE),
+      Bias = mean(Bias, na.rm = TRUE),
+      round = round_num,  # Add round here, inside summarize
+      .groups = "drop"
+    )
+
+  # --- Step 3: Aggregate importance (average across 10 folds) ---
+  importance_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+    fold_results_list[[i]]$importance %>%
+      mutate(fold = i, round = round_num)
+  })
+
+  importance_summary <- summarize_importance_by_round(importance_raw)
+
+  # --- Step 4: Collect all predictions (no aggregation) ---
+  predictions_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+    fold_results_list[[i]]$predictions %>%
+      mutate(round = round_num, fold = i)
+  })
+
+  # --- Step 5: SAVE LARGE OBJECTS TO DISK (in sub-folders) ---
+
+  # Define sub-folder paths
+  preds_save_path <- file.path(save_path, "predictions")
+  importance_save_path <- file.path(save_path, "importance")
+
+  # Create them if they don't exist (recursive = TRUE handles this safely)
+  dir.create(preds_save_path, recursive = TRUE, showWarnings = FALSE)
+  dir.create(importance_save_path, recursive = TRUE, showWarnings = FALSE)
+
+  tryCatch({
+    # Define unique file paths for this round
+    preds_file <- file.path(preds_save_path, paste0("preds_round_", round_num, ".arrow"))
+    importance_file <- file.path(importance_save_path, paste0("importance_round_", round_num, ".arrow"))
+
+    # Write the files using feather (super fast)
+    arrow::write_feather(predictions_raw, preds_file)
+    arrow::write_feather(importance_summary, importance_file)
+
+  }, error = function(e) {
+    # Log an error if saving fails
+    message(paste("ERROR in round", round_num, ": Failed to write results to disk.", e$message))
+  })
+
+  # --- Step 6: Return ONLY the small metrics dataframe ---
+  return(metrics_summary)
+}
+
+
+# process_one_round <- function(round_num,
+#                               test_folds_for_this_round,
+#                               cal_folds_for_this_round,
+#                               full_df,
+#                               terms_lm, terms_gam,
+#                               best_params_xgb, best_params_rf,
+#                               vip_threshold = 1.0,
+#                               save_path = "temp_arrow") { # <-- Added save_path argument
+# 
+#   # --- Step 1: Run all 10 folds sequentially ---
+#   fold_results_list <- purrr::map(1:10, function(fold_num) {
+#     run_all_models_for_fold(
+#       cal_indices = cal_folds_for_this_round[[fold_num]],
+#       test_indices = test_folds_for_this_round[[fold_num]],
+#       full_df = full_df,
+#       terms_lm = terms_lm,
+#       terms_gam = terms_gam,
+#       best_params_xgb = best_params_xgb,
+#       best_params_rf = best_params_rf,
+#       vip_threshold = vip_threshold
+#     )
+#   })
+# 
+#   # --- Step 2: Aggregate metrics (average across 10 folds) ---
+#   metrics_summary <- purrr::map_dfr(fold_results_list, "metrics") %>%
+#     group_by(model_type, model_name) %>%
+#     summarize(
+#       R2 = mean(R2, na.rm = TRUE),
+#       RMSE = mean(RMSE, na.rm = TRUE),
+#       RPD = mean(RPD, na.rm = TRUE),
+#       Bias = mean(Bias, na.rm = TRUE),
+#       round = round_num,  # Add round here, inside summarize
+#       .groups = "drop"
+#     )
+# 
+#   # --- Step 3: Aggregate importance (average across 10 folds) ---
+#   importance_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+#     fold_results_list[[i]]$importance %>%
+#       mutate(fold = i, round = round_num)
+#   })
+# 
+#   importance_summary <- summarize_importance_by_round(importance_raw)
+# 
+#   # --- Step 4: Collect all predictions (no aggregation) ---
+#   predictions_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+#     fold_results_list[[i]]$predictions %>%
+#       mutate(round = round_num, fold = i)
+#   })
+# 
+#   # --- Step 5: SAVE LARGE OBJECTS TO DISK ---
+#   # Instead of returning them, we write them out
+#   
+#   tryCatch({
+#     # Define unique file paths for this round
+#     preds_file <- file.path(save_path, paste0("preds_round_", round_num, ".arrow"))
+#     importance_file <- file.path(save_path, paste0("importance_round_", round_num, ".arrow"))
+#     
+#     # Write the files using feather (super fast)
+#     arrow::write_feather(predictions_raw, preds_file)
+#     arrow::write_feather(importance_summary, importance_file)
+#     
+#   }, error = function(e) {
+#     # Log an error if saving fails
+#     message(paste("ERROR in round", round_num, ": Failed to write results to disk.", e$message))
+#   })
+#   
+#   # --- Step 6: Return ONLY the small metrics dataframe ---
+#   # This is the key. The worker sends almost no data back to the main session.
+#   return(metrics_summary)
+# }
+
+# process_one_round <- function(round_num,
+#                               test_folds_for_this_round,
+#                               cal_folds_for_this_round,
+#                               full_df,
+#                               terms_lm, terms_gam,
+#                               best_params_xgb, best_params_rf,
+#                               vip_threshold = 1.0,
+#                               save_path = "temp_arrow") {
+# 
+#   # --- Step 1: Run all 10 folds sequentially ---
+#   fold_results_list <- purrr::map(1:10, function(fold_num) {
+#     run_all_models_for_fold(
+#       cal_indices = cal_folds_for_this_round[[fold_num]],
+#       test_indices = test_folds_for_this_round[[fold_num]],
+#       full_df = full_df,
+#       terms_lm = terms_lm,
+#       terms_gam = terms_gam,
+#       best_params_xgb = best_params_xgb,
+#       best_params_rf = best_params_rf,
+#       vip_threshold = vip_threshold
+#     )
+#   })
+# 
+#   # --- Step 2: Aggregate metrics (average across 10 folds) ---
+#   metrics_summary <- purrr::map_dfr(fold_results_list, "metrics") %>%
+#     group_by(model_type, model_name) %>%
+#     summarize(
+#       R2 = mean(R2, na.rm = TRUE),
+#       RMSE = mean(RMSE, na.rm = TRUE),
+#       RPD = mean(RPD, na.rm = TRUE),
+#       Bias = mean(Bias, na.rm = TRUE),
+#       round = round_num,  # Add round here, inside summarize
+#       .groups = "drop"
+#     )
+# 
+#   # --- Step 3: Aggregate importance (average across 10 folds) ---
+#   importance_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+#     fold_results_list[[i]]$importance %>%
+#       mutate(fold = i, round = round_num)
+#   })
+# 
+#   importance_summary <- summarize_importance_by_round(importance_raw)
+# 
+#   # --- Step 4: Collect all predictions (no aggregation) ---
+#   predictions_raw <- purrr::map_dfr(seq_along(fold_results_list), function(i) {
+#     fold_results_list[[i]]$predictions %>%
+#       mutate(round = round_num, fold = i)
+#   })
+# 
+#   # --- Step 5: SAVE LARGE OBJECTS TO DISK ---
+#   # Instead of returning them, we write them out
+#   
+#   tryCatch({
+#     # Define unique file paths for this round
+#     preds_file <- file.path(save_path, paste0("preds_round_", round_num, ".arrow"))
+#     importance_file <- file.path(save_path, paste0("importance_round_", round_num, ".arrow"))
+#     
+#     # Write the files using feather (super fast)
+#     arrow::write_feather(predictions_raw, preds_file)
+#     arrow::write_feather(importance_summary, importance_file)
+#     
+#   }, error = function(e) {
+#     # Log an error if saving fails
+#     message(paste("ERROR in round", round_num, ": Failed to write results to disk.", e$message))
+#   })
+#   
+#   # --- Step 6: Return ONLY the small metrics dataframe ---
+#   # This is the key. The worker sends almost no data back to the main session.
+#   return(metrics_summary)
+# }
+```
+
+
+```{r}
+# =============================================================================
+# SECTION 5: MAIN PARALLEL CV ORCHESTRATION
+# =============================================================================
+
+# =============================================================================
+# SECTION 5: MAIN PARALLEL CV ORCHESTRATION
+# =============================================================================
+
+#' Run complete repeated cross-validation analysis
+#' 
+#' Master function that orchestrates the entire repeated CV process.
+#' Splits are parallelized at the ROUND level. Workers save large
+#' results (predictions, importance) to disk and return ONLY the
+#' small, summarized metrics dataframe.
+#' 
+#' @param save_path_prefix A prefix for the temporary save directory
+# ... (all other args are the same) ...
+#' @return List with all_cv_metrics and the path to the large results
+#'
+run_all_models_cv <- function(df, num_rounds, terms_lm, terms_gam,
+                              best_params_xgb, best_params_rf,
+                              vip_threshold = 1.0, n_cores = 8,
+                              save_path_prefix = "temp_results") {
+
+  cli::cli_h1(paste("Starting Repeated CV for", deparse(substitute(df))))
+
+  # --- Step 1: Generate all train/test splits ---
+  cli::cli_alert_info(paste("Generating", num_rounds * 10, "CV fold jobs..."))
+
+  test.idx_nested <- generate_multiple_splits(df, num_rounds)
+
+  cal.idx_nested <- purrr::map(test.idx_nested, ~ {
+    purrr::map(., ~ setdiff(1:nrow(df), .))
+  })
+  
+  # --- Create a unique, timestamped save directory for this run ---
+  run_save_path <- paste0(save_path_prefix, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+  dir.create(run_save_path, recursive = TRUE)
+  cli::cli_alert_info(paste("Saving all large results to:", run_save_path))
+
+
+  # --- Step 2: Run all rounds in parallel ---
+  cli::cli_alert_info(paste("Running", num_rounds, "rounds on", n_cores, "cores..."))
+
+  plan(multisession, workers = n_cores)
+
+  # *** THIS WAS THE MISSING LINE ***
+  round_indices <- seq_along(test.idx_nested)
+
+  # This list will ONLY contain the small metrics dataframes
+  all_metrics_list <- furrr::future_pmap(
+    .l = list(
+      test_folds = test.idx_nested,
+      cal_folds = cal.idx_nested,
+      round_num = round_indices  # <-- This now works
+    ),
+    .f = function(test_folds, cal_folds, round_num) {
+      # We call the modified worker function
+      process_one_round(
+        round_num = round_num,
+        test_folds_for_this_round = test_folds,
+        cal_folds_for_this_round = cal_folds,
+        full_df = df,
+        terms_lm = terms_lm,
+        terms_gam = terms_gam,
+        best_params_xgb = best_params_xgb,
+        best_params_rf = best_params_rf,
+        vip_threshold = vip_threshold,
+        save_path = run_save_path  # <-- Pass the save path to the worker
+      )
+    },
+    .options = furrr_options(
+      seed = TRUE,
+      # CRITICAL: Tell the workers to load `arrow`
+      packages = c("dplyr", "purrr", "mgcv", "caret", "mdatools", "ranger", "xgboost", "arrow")
+    )
+  )
+
+  plan(sequential)
+  cli::cli_alert_success("Parallel CV execution complete.")
+
+  # --- Step 3: Aggregate all round-level results ---
+  cli::cli_alert_info("Aggregating metrics results (in memory)...")
+
+  # This is the only aggregation we do. It will be fast and use no RAM.
+  all_cv_metrics <- bind_rows(all_metrics_list)
+
+  # Free memory
+  rm(all_metrics_list)
+  gc()
+
+  cli::cli_alert_success("Aggregation complete.")
+  cli::cli_alert_warning(paste("Large results (predictions, importance) are now saved in:", run_save_path))
+
+  # Return the metrics and the path to the big files
+  return(list(
+    all_cv_metrics = all_cv_metrics,
+    large_results_path = run_save_path # <-- Return the path
+  ))
+}
+
+
+
+
+
+#' Run complete repeated cross-validation analysis
+#' 
+#' Master function that orchestrates the entire repeated CV process.
+#' Splits are parallelized at the ROUND level (not fold level) to
+#' enable efficient memory-saving aggregation.
+#' 
+#' @param df Dataset to analyze
+#' @param num_rounds Number of independent CV repetitions
+#' @param terms_lm Pre-selected LM model formulas
+#' @param terms_gam Pre-selected GAM model formulas
+#' @param best_params_xgb Tuned XGBoost parameters
+#' @param best_params_rf Tuned Random Forest parameters
+#' @param vip_threshold VIP score cutoff for PLS variable selection
+#' @param n_cores Number of CPU cores for parallel processing
+#' @return List with all_cv_metrics, all_cv_predictions, all_cv_importance
+
+# run_all_models_cv <- function(df, num_rounds, terms_lm, terms_gam,
+#                               best_params_xgb, best_params_rf,
+#                               vip_threshold = 1.0, n_cores = 8,
+#                               save_path_prefix = "temp_results") {
+# 
+#   cli::cli_h1(paste("Starting Repeated CV for", deparse(substitute(df))))
+# 
+#   # --- Step 1: Generate all train/test splits ---
+#   cli::cli_alert_info(paste("Generating", num_rounds * 10, "CV fold jobs..."))
+# 
+#   test.idx_nested <- generate_multiple_splits(df, num_rounds)
+# 
+#   cal.idx_nested <- purrr::map(test.idx_nested, ~ {
+#     purrr::map(., ~ setdiff(1:nrow(df), .))
+#   })
+# 
+#   
+#   # --- Create a unique, timestamped save directory for this run ---
+#   run_save_path <- paste0(save_path_prefix, "_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+#   dir.create(run_save_path, recursive = TRUE)
+#   cli::cli_alert_info(paste("Saving all large results to:", run_save_path))
+#   
+#   
+#   # This list will ONLY contain the small metrics dataframes
+#   all_metrics_list <- furrr::future_pmap(
+#     .l = list(
+#       test_folds = test.idx_nested,
+#       cal_folds = cal.idx_nested,
+#       round_num = round_indices
+#     ),
+#     .f = function(test_folds, cal_folds, round_num) {
+#       # We call the modified worker function
+#       process_one_round(
+#         round_num = round_num,
+#         test_folds_for_this_round = test_folds,
+#         cal_folds_for_this_round = cal_folds,
+#         full_df = df,
+#         terms_lm = terms_lm,
+#         terms_gam = terms_gam,
+#         best_params_xgb = best_params_xgb,
+#         best_params_rf = best_params_rf,
+#         vip_threshold = vip_threshold,
+#         save_path = run_save_path  # <-- Pass the save path to the worker
+#       )
+#     },
+#     .options = furrr_options(
+#       seed = TRUE,
+#       # CRITICAL: Tell the workers to load `arrow`
+#       packages = c("dplyr", "purrr", "mgcv", "caret", "mdatools", "ranger", "xgboost", "arrow")
+#     )
+#   )
+# 
+#   plan(sequential)
+#   cli::cli_alert_success("Parallel CV execution complete.")
+# 
+#   # --- Step 3: Aggregate all round-level results ---
+#   cli::cli_alert_info("Aggregating metrics results (in memory)...")
+# 
+#   # This is the only aggregation we do. It will be fast and use no RAM.
+#   all_cv_metrics <- bind_rows(all_metrics_list)
+# 
+#   # Free memory
+#   rm(all_metrics_list)
+#   gc()
+# 
+#   cli::cli_alert_success("Aggregation complete.")
+#   cli::cli_alert_warning(paste("Large results (predictions, importance) are now saved in:", run_save_path))
+# 
+#   # Return the metrics and the path to the big files
+#   return(list(
+#     all_cv_metrics = all_cv_metrics,
+#     large_results_path = run_save_path # <-- Return the path
+#   ))
+# }
+```
+
+
+```{r}
+# =============================================================================
+# SECTION 6: HIGH-LEVEL EXPERIMENT RUNNER
+# =============================================================================
+
+#' Run complete modeling experiment with model selection
+#' 
+#' Top-level function that handles:
+#'   1. Model selection via dredge (finds best PCA-based models)
+#'   2. Repeated cross-validation
+#'   3. Result summarization and saving
+#' 
+#' @param df_to_run Dataset to analyze
+#' @param save_prefix Prefix for output filenames
+#' @param num_rounds Number of CV repetitions
+#' @param best_params_xgb Tuned XGBoost parameters
+#' @param best_params_rf Tuned Random Forest parameters
+#' @param vip_threshold VIP score cutoff for PLS
+#' @param n_cores Number of CPU cores
+#' @return List with all CV results
+run_experiment <- function(df_to_run,
+                           save_prefix,
+                           num_rounds,
+                           best_params_xgb,
+                           best_params_rf,
+                           vip_threshold = 1.0,
+                           n_cores = 8) {
+  
+  # --- Step 1: Model selection via dredge ---
+  cli::cli_h1(paste("Running Dredge Pre-computation for:", save_prefix))
+  
+  pca_spec_cols <- find_cols(df_to_run)
+  
+  # Perform PCA on full dataset for model selection
+  dredge_pc.mod <- caret::preProcess(
+    df_to_run[, pca_spec_cols],
+    method = c("center", "pca"),
+    pcaComp = 10
+  )
+  
+  dredge_cal_pca <- cbind(
+    predict(dredge_pc.mod, df_to_run[, pca_spec_cols]),
+    df_to_run
+  )
+  
+  dredge_model_data <- dredge_cal_pca[, c("read_age", paste0("PC", 1:10))]
+  
+  # Build global models for dredging
+  dredge_global_lm <- lm(
+    read_age ~ .,
+    data = dredge_model_data,
+    na.action = "na.fail",
+    model = TRUE
+  )
+  
+  dredge_global_gam <- mgcv::gam(
+    read_age ~ s(PC1, k = 4) + s(PC2, k = 4) + s(PC3, k = 4) + 
+      s(PC4, k = 4) + s(PC5, k = 4) + s(PC6, k = 4) + 
+      s(PC7, k = 4) + s(PC8, k = 4) + s(PC9, k = 4) + s(PC10, k = 4),
+    data = dredge_model_data,
+    na.action = "na.fail",
+    model = TRUE
+  )
+  
+  # Attach data to model environments (required for dredge)
+  attr(dredge_global_lm$terms, ".Environment") <- 
+    list2env(list(dredge_model_data = dredge_model_data))
+  attr(dredge_global_gam$terms, ".Environment") <- 
+    list2env(list(dredge_model_data = dredge_model_data))
+  
+  # Perform model selection
+  cli::cli_alert_info("Dredging LM... (this may take a moment)")
+  suppressMessages({
+    top10_lm_models <- get.models(
+      dredge(dredge_global_lm, trace = FALSE),
+      subset = 1:10
+    )
+  })
+  
+  cli::cli_alert_info("Dredging GAM... (this may take a moment)")
+  suppressMessages({
+    top10_gam_models <- get.models(
+      dredge(dredge_global_gam, trace = FALSE),
+      subset = 1:10
+    )
+  })
+  
+  # Extract model formulas
+  terms_lm <- lapply(top10_lm_models, function(m) m$terms)
+  terms_gam <- lapply(top10_gam_models, function(m) m$formula)
+  
+  cli::cli_alert_success("Dredge pre-computation complete.")
+  
+  
+  # --- Define paths ---
+  # Path for the small final .RDS object
+  save_filename_rds <- paste0(
+    "Chapter 2/",
+    save_prefix,
+    "_",
+    num_rounds,
+    "x10_CV_results.RDS" # This file will now only contain metrics
+  )
+  
+  # Path for the folder of large Arrow files
+  temp_save_path <- file.path("Chapter 2", "temp_arrow_files", save_prefix)
+  
+  
+  # --- Step 2: Run cross-validation ---
+  set.seed(6)  # For reproducible splits
+  
+  Sys.time()
+  
+  cv_results <- run_all_models_cv(
+    df = df_to_run,
+    num_rounds = num_rounds,
+    best_params_xgb = best_params_xgb,
+    best_params_rf = best_params_rf,
+    terms_lm = terms_lm,
+    terms_gam = terms_gam,
+    vip_threshold = vip_threshold,
+    n_cores = n_cores, 
+    save_path_prefix = temp_save_path
+  )
+  
+  Sys.time()
+  cli::cli_h1(paste("CV Analysis Complete for:", save_prefix))
+  
+  # --- Step 3: Summarize and display results ---
+  cv_summary <- cv_results$all_cv_metrics %>%
+    group_by(model_type, model_name) %>%
+    summarize(
+      mean_R2 = mean(R2),
+      mean_RMSE = mean(RMSE),
+      mean_RPD = mean(RPD),
+      mean_Bias = mean(Bias),
+      .groups = "drop"
+    ) %>%
+    arrange(mean_RMSE)
+  
+  cat(paste(
+    "\n--- OVERALL CV METRICS for", save_prefix,
+    "(Mean of", num_rounds * 10, "runs) ---\n"
+  ))
+  print(cv_summary)
+  
+  # --- Step 4: Save results ---
+ saveRDS(cv_results, save_filename_rds)
+  cli::cli_alert_success(paste("Metrics object saved to:", save_filename_rds))
+  cli::cli_alert_info(paste("Large results saved in:", cv_results$large_results_path))
+  
+  return(cv_results)
+}
+```
+
+
+```{r}
+# =============================================================================
+# SECTION 7: UTILITY FUNCTIONS
+# =============================================================================
+
+#' Clean up parallel workers
+#' 
+#' Resets the parallel backend and clears any zombie worker processes.
+#' Should be called before starting new parallel operations.
+cleanup_parallel <- function() {
+  
+  # Reset to sequential processing
+  future::plan(future::sequential)
+  
+  # Force garbage collection
+  gc()
+  
+  # Kill zombie workers (Unix/Mac only)
+  if (.Platform$OS.type == "unix") {
+    system("pkill -f 'future::ClusterRegistry'", ignore.stderr = TRUE)
+  }
+  
+  # Clear future registry
+  if (exists(".future", envir = .GlobalEnv)) {
+    rm(.future, envir = .GlobalEnv)
+  }
+  
+  cli::cli_alert_success("Parallel workers cleaned up. Plan reset to sequential.")
+  
+  invisible(TRUE)
+}
+```
+
+
+# RUN THE MODELS
+```{r}
+# =============================================================================
+# SECTION 8: EXECUTION
+# =============================================================================
+
+# --- 8.1: Initialize ---
+cleanup_parallel()
+
+# --- 8.2: Preprocess Data ---
+cli::cli_h1("Preprocessing Data")
+
+kodiak_proc <- sg_filter(kodiak_raw, 1, 3, 19)
+shumagin_proc <- sg_filter(shumagin_raw, 1, 3, 19)
+lpw_proc <- sg_filter(lpw_raw, 1, 3, 19)
+
+wild_proc <- bind_rows(kodiak_proc, shumagin_proc)
+all_proc <- bind_rows(kodiak_proc, shumagin_proc, lpw_proc)
+
+# --- 8.3: Load Hyperparameters ---
+cli::cli_h1("Loading Hyperparameters")
+
+best_xgb <- list()
+best_rf <- list()
+
+# LPW parameters
+best_xgb$lpw <- as.data.frame(readRDS("Chapter 1/LPW_best_xgb_params_tuned_2025-10-31.RDS"))
+best_rf$lpw <- readRDS("Chapter 1/LPW_best_RF_params_tuned_2025-10-31.RDS")
+best_rf$lpw <- best_rf$lpw$bestTune
+
+# All combined parameters
+best_xgb$all <- as.data.frame(readRDS("Chapter 2/ALL_best_xgb_params_tuned_2025-11-07.RDS"))
+best_rf$all <- as.data.frame(readRDS("Chapter 2/ALL_best_RF_params_tuned_2025-11-07.RDS"))
+
+# Wild parameters
+best_xgb$wild <- as.data.frame(readRDS("Chapter 2/wild_best_xgb_params_tuned_2025-11-07.RDS"))
+best_rf$wild <- as.data.frame(readRDS("Chapter 2/wild_best_RF_params_tuned_2025-11-07.RDS"))
+
+# Shumagin parameters
+best_xgb$shu <- as.data.frame(readRDS("Chapter 2/shu_best_xgb_params_tuned_2025-11-07.RDS"))
+best_rf$shu <- as.data.frame(readRDS("Chapter 2/shu_best_RF_params_tuned_2025-11-07.RDS"))
+
+# Kodiak parameters
+best_xgb$kod <- as.data.frame(readRDS("Chapter 2/kod_best_xgb_params_tuned_2025-11-07.RDS"))
+best_rf$kod <- as.data.frame(readRDS("Chapter 2/kod_best_RF_params_tuned_2025-11-07.RDS"))
+
+
+# --- 8.4: Run Experiments ---
+# Uncomment the experiment you want to run
+
+# # ALL SPECIMENS (500 rounds, ~3 hours runtime)
+# cleanup_parallel()
+# Sys.time()
+# all_cv_results <- run_experiment(
+#   df_to_run = all_proc,
+#   save_prefix = "all",
+#   num_rounds = 500,
+#   best_params_xgb = best_xgb$all,
+#   best_params_rf = best_rf$all,
+#   vip_threshold = 0.5,
+#   n_cores = 8
+# )
+# Sys.time()
+
+
+# # WILD SPECIMENS (500 rounds, ~2 hours runtime)
+# cleanup_parallel()
+# Sys.time()
+# wild_cv_results <- run_experiment(
+#   df_to_run = wild_proc,
+#   save_prefix = "wild",
+#   num_rounds = 500,
+#   best_params_xgb = best_xgb$wild,
+#   best_params_rf = best_rf$wild,
+#   vip_threshold = 0.5,
+#   n_cores = 8
+# )
+# Sys.time()
+
+# KODIAK SPECIMENS
+# cleanup_parallel()
+# Sys.time()
+# kod_cv_results <- run_experiment(
+#   df_to_run = kodiak_proc,
+#   save_prefix = "kod",
+#   num_rounds = 500,
+#   best_params_xgb = best_xgb$kod,
+#   best_params_rf = best_rf$kod,
+#   vip_threshold = 0.5,
+#   n_cores = 8
+# )
+# Sys.time()
+
+# # SHUMAGIN SPECIMENS
+# cleanup_parallel()
+# Sys.time()
+# shu_cv_results <- run_experiment(
+#   df_to_run = shumagin_proc,
+#   save_prefix = "shu",
+#   num_rounds = 500,
+#   best_params_xgb = best_xgb$shu,
+#   best_params_rf = best_rf$shu,
+#   vip_threshold = 0.5,
+#   n_cores = 8
+# )
+# Sys.time()
+
+# LPW SPECIMENS
+cleanup_parallel()
+lpw_proc <- sg_filter(lpw_raw, 1, 3, 17)  # Match original preprocessing
+
+Sys.time()
+lpw_cv_results <- run_experiment(
+  df_to_run = lpw_proc,
+  save_prefix = "LPW",
+  num_rounds = 500,
+  best_params_xgb = best_xgb$lpw,
+  best_params_rf = best_rf$lpw,
+  vip_threshold = 0.5,
+  n_cores = 8
+)
+Sys.time()
+
+
+```
+
+
+
+# COMPILE THE FILES
+```{r}
+library(arrow)
+library(dplyr)
+
+# Load the results object you saved
+results_path_info <- readRDS(file.choose())
+large_files_path <- results_path_info$large_results_path
+
+cv_metrics <- results_path_info$all_cv_metrics
+
+# results_summary <- results_path_info$all_cv_metrics %>% 
+#   group_by(model_name) %>% 
+#   summarize(
+#     across(R2:Bias, \(x) mean(x, na.rm = TRUE)), # <--- Function is INSIDE across()
+#     .groups = "drop"
+#   )
+
+# This points to the 'predictions' sub-folder and works perfectly
+all_preds_lazy <- open_dataset(file.path(large_files_path, "predictions"), format = "arrow")
+all_importance_lazy <- open_dataset(file.path(large_files_path, "importance"), format = "arrow")
+
+# make df from preds/importance
+predictions_df <- collect(all_preds_lazy)
+importance_df <- collect(all_importance_lazy)
+```
+
+
+```{r}
+# =============================================================================
+# VISUALIZATION CODE - ADAPTED FOR NEW CV FRAMEWORK
+# =============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(patchwork)
+library(gridExtra)
+library(cowplot)
+library(purrr)
+library(tidyr)
+library(viridis)
+library(gt)
+library(lubridate)
+
+# Define consistent color palette
+color_palette <- c(
+  "PCA"    = "#4477AA", # Linear and GAM models
+  "PLS"    = "#AA3377", # PLS models
+  "ML"     = "#228833", # RF and XGB models
+  "Simple" = "#CCBB44"  # Simple LM and GAM
+)
+
+timestamp <- format(Sys.Date(), "%Y-%m-%d")
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# LOAD DATA AND PREPARE ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+# Load CV results (adjust to your actual results object)
+
+# cv_results <- readRDS("Chapter 2/wild_500x10_CV_results.RDS")
+
+# # cv_results <- kod_cv_results
+region_prefix <- "LPW_500_GOOD"
+df <- lpw_proc
+
+
+
+
+
+speccols <- find_cols(df)
+
+# cv_metrics <- cv_results$all_cv_metrics
+# importance_df <- cv_results$all_cv_importance
+# predictions_df <- cv_results$all_cv_predictions
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# DATA PREPARATION ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+# Find best PCA models dynamically
+summary_table <- cv_metrics %>%
+  group_by(model_type, model_name) %>%
+ summarize(
+    # Calculate the mean using ONLY finite values
+    across(R2:Bias, \(x) mean(x[is.finite(x)])),
+    .groups = "drop"
+  )
+
+
+# results_summary <- results_path_info$all_cv_metrics %>% 
+#   group_by(model_name) %>% 
+#   summarize(
+#     # Calculate the mean using ONLY finite values
+#     across(R2:Bias, \(x) mean(x[is.finite(x)])),
+#     .groups = "drop"
+#   )
+
+
+best_gam_name <- summary_table %>%
+  filter(model_type == "PCA-GAM") %>%
+  arrange(RMSE) %>%
+  dplyr::slice(1) %>%
+  pull(model_name)
+
+best_lm_name <- summary_table %>%
+  filter(model_type == "PCA-LM") %>%
+  arrange(RMSE) %>%
+  dplyr::slice(1) %>%
+  pull(model_name)
+
+cat("Best PCA-GAM Model:", best_gam_name, "\n")
+cat("Best PCA-LM Model:", best_lm_name, "\n")
+
+# Define final model order and names for plots
+final_model_order <- c(
+  "LM", "GAM", "PLS", "PLS (VIP)", 
+  "XGB", "RF", "LM (Simple)", "GAM (Simple)"
+)
+
+# Prepare metrics data with consistent naming
+all_results_cleaned <- cv_metrics %>%
+  mutate(
+    Model = case_when(
+      model_name == best_lm_name ~ "LM",
+      model_name == best_gam_name ~ "GAM",
+      model_name == "PLS" ~ "PLS",
+      str_detect(model_name, "PLS-VIP") ~ "PLS (VIP)",
+      model_name == "XGBoost" ~ "XGB",
+      model_name == "Random Forest" ~ "RF",
+      model_name == "Simple-LM (L+SW)" ~ "LM (Simple)",
+      model_name == "Simple-GAM (L+SW)" ~ "GAM (Simple)",
+      TRUE ~ NA_character_
+    ),
+    ModelType = case_when(
+      model_type %in% c("PCA-LM", "PCA-GAM") ~ "PCA",
+      model_type %in% c("PLS", "PLS-VIP") ~ "PLS",
+      model_type %in% c("XGB", "RF") ~ "ML",
+      model_type == "Simple" ~ "Simple",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Model)) %>%
+  mutate(
+    Model = factor(Model, levels = final_model_order),
+    ModelType = factor(ModelType, levels = c("PCA", "PLS", "ML", "Simple"))
+  )
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# FIGURE 1: MODEL PERFORMANCE BOXPLOTS ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+create_boxplot <- function(data, y_var, y_lab, show_x_axis = FALSE) {
+  y_var_q <- rlang::enquo(y_var)
+  
+  p <- ggplot(data, aes(x = Model, y = !!y_var_q, fill = ModelType)) +
+    geom_boxplot(
+      outlier.shape = 1,
+      outlier.size = 1.3,
+      outlier.alpha = 0.7,
+      color = "black",
+      width = 0.5,
+      alpha = 0.8
+    ) +
+    scale_fill_manual(values = color_palette) +
+    scale_x_discrete(
+      labels = function(x) str_replace(x, " \\(", "\n(")
+    ) +
+    labs(y = y_lab, x = NULL) +
+    theme_bw(base_size = 15) +
+    theme(legend.position = "none")
+  
+  if (!show_x_axis) {
+    p <- p + theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank()
+    )
+  }
+  return(p)
+}
+
+p_rmse <- create_boxplot(all_results_cleaned, RMSE, "RMSE (Days)")
+p_r2 <- create_boxplot(all_results_cleaned, R2, expression(R^2))
+p_bias <- create_boxplot(all_results_cleaned, Bias, "Bias (Days)", show_x_axis = TRUE) +
+  geom_hline(yintercept = 0, color = "gray40", linewidth = 1, linetype = 2)
+p_rpd <- create_boxplot(all_results_cleaned, RPD, "RPD", show_x_axis = TRUE)
+
+# Create legend
+legend_plot <- ggplot(all_results_cleaned, aes(x = Model, y = RMSE, fill = ModelType)) +
+  geom_boxplot() + 
+  scale_fill_manual(values = color_palette, name = "Model Type") + 
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(t = -12, unit = "pt"),
+    strip.background = element_rect(fill = "gray90"), 
+    legend.text = element_text(size = 15.5),
+    legend.title = element_text(size = 15.5)
+  )
+
+shared_legend <- get_legend(legend_plot)
+
+# Combine plots
+composite_plot <- arrangeGrob(
+  arrangeGrob(p_rmse, p_r2, p_bias, p_rpd, nrow = 2),
+  shared_legend,
+  nrow = 2,
+  heights = c(10, 1)
+)
+
+grid.arrange(composite_plot)
+
+ggsave(
+  filename = paste0("Chapter 2/", "model_comparison_boxplots_", region_prefix, "_", timestamp, ".png"),
+  plot = composite_plot,
+  width = 12,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# FIGURE 3: AGE PREDICTIONS (RESIDUALS) ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+
+
+final_type_order <- c("PCA", "PLS", "ML", "Simple")
+
+# Prepare predictions data
+avg_predictions <- predictions_df %>%
+  mutate(
+    Model = case_when(
+      model_name == best_lm_name ~ "LM",
+      model_name == best_gam_name ~ "GAM",
+      model_name == "PLS" ~ "PLS",
+      str_detect(model_name, "PLS-VIP") ~ "PLS (VIP)",
+      model_name == "XGBoost" ~ "XGB",
+      model_name == "Random Forest" ~ "RF",
+      model_name == "Simple-LM (L+SW)" ~ "LM (Simple)",
+      model_name == "Simple-GAM (L+SW)" ~ "GAM (Simple)",
+      TRUE ~ NA_character_
+    ),
+    ModelType = case_when(
+      model_type %in% c("PCA-LM", "PCA-GAM") ~ "PCA",
+      model_type %in% c("PLS", "PLS-VIP") ~ "PLS",
+      model_type %in% c("XGB", "RF") ~ "ML",
+      model_type == "Simple" ~ "Simple",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Model)) %>%
+  group_by(specimen, Model, ModelType, obs_age) %>%
+  summarise(
+    median_pred_age = median(pred_age, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    residual = median_pred_age - obs_age,
+    Model = factor(Model, levels = final_model_order)
+  )
+
+
+# 1:1 prediction plot
+final_pred_plot <- ggplot(avg_predictions, aes(x = obs_age, y = median_pred_age)) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") + 
+  geom_point(aes(color = ModelType), alpha = 0.75, size = 1.5) +
+  scale_color_manual(
+    values = color_palette, 
+    name = "Model Type",
+    breaks = final_type_order # Ensures legend follows this exact order
+  ) +
+  facet_wrap(~ Model, ncol = 3) + 
+  labs(
+    x = "Thin Section Age (Days)",
+    y = "Predicted Age (Days)"
+  ) +
+  theme_bw(base_size = 18) +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(t = -5.5, unit = "pt"),
+    strip.background = element_rect(fill = "gray90")
+  )
+
+
+# Create residual plot
+# final_pred_plot <- ggplot(avg_predictions, aes(x = obs_age, y = residual)) +
+#   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+#   geom_point(aes(color = ModelType), alpha = 0.75, size = 1.5) +
+#   scale_color_manual(values = color_palette, name = "Model Type") +
+#   facet_wrap(~ Model, ncol = 3) + 
+#   labs(
+#     x = "Actual Age (Days)",
+#     y = "Prediction Error (Predicted - Actual)"
+#   ) +
+#   theme_bw(base_size = 18) +
+#   theme(
+#     legend.position = "bottom",
+#     legend.margin = margin(t = -5.5, unit = "pt"),
+#     strip.background = element_rect(fill = "gray90")
+#   )
+
+print(final_pred_plot)
+
+ggsave(
+  filename = paste0("Chapter 2/", "age_predictions_", region_prefix, "_", timestamp, ".png"),
+  plot = final_pred_plot,
+  width = 8,
+  height = 8,
+  dpi = 600
+)
+
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# FIGURE: IMPORTANCE WITH SPECTRA OVERLAY ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+
+
+# Prepare spectral data for overlay
+scan_proc_long <- df %>%
+  filter(!is.na(read_age)) %>%
+  pivot_longer(
+    cols = all_of(speccols),
+    names_to = "wavenumber",
+    values_to = "absorbance"
+  ) %>%
+  mutate(wavenumber = as.numeric(wavenumber))
+
+# Use a random sample from the dataset
+specimen_proc_long <- scan_proc_long %>% filter(specimen == sample(unique(df$specimen), 1))
+
+# Calculate absorbance range for scaling
+ABS_MIN <- min(specimen_proc_long$absorbance, na.rm = TRUE)
+ABS_MAX <- max(specimen_proc_long$absorbance, na.rm = TRUE)
+ABS_RANGE <- ABS_MAX - ABS_MIN
+
+# Prepare importance data
+lm_comp <- str_extract(best_lm_name, "\\d+")
+gam_comp <- str_extract(best_gam_name, "\\d+")
+
+final_method_order_importance <- c(
+  "PCA Loadings (LM)",
+  "PCA Loadings (GAM)",
+  "VIP Score (PLS)",
+  "Gain (XGB)",
+  "Permutation (RF)"
+)
+
+importance_summary <- importance_df %>%
+  mutate(
+    method = case_when(
+      model_name == best_lm_name ~ "PCA Loadings (LM)",
+      model_name == best_gam_name ~ "PCA Loadings (GAM)",
+      model_name == "PLS-VIP" ~ "VIP Score (PLS)",
+      model_name == "XGBoost" ~ "Gain (XGB)",
+      model_name == "Random Forest" ~ "Permutation (RF)",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(method)) %>%
+  group_by(method, wavenumber) %>%
+  summarise(
+    final_mean = mean(importance_mean, na.rm = TRUE),
+    lower_bound = mean(importance_mean - 2*importance_sd, na.rm = TRUE),
+    upper_bound = mean(importance_mean + 2*importance_sd, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(method = factor(method, levels = final_method_order_importance))
+
+# Extract data for plotting
+lm_pca_data <- filter(importance_summary, method == "PCA Loadings (LM)")
+gam_pca_data <- filter(importance_summary, method == "PCA Loadings (GAM)")
+pls_data <- filter(importance_summary, method == "VIP Score (PLS)")
+xgb_data <- filter(importance_summary, method == "Gain (XGB)")
+rf_data <- filter(importance_summary, method == "Permutation (RF)")
+
+# Universal overlay function
+add_spectra_overlay <- function(plot_obj, importance_data) {
+  I_MIN <- min(importance_data$final_mean, na.rm = TRUE)
+  I_MAX <- max(importance_data$final_mean, na.rm = TRUE)
+  I_RANGE <- I_MAX - I_MIN
+  
+  if (I_RANGE < 1e-6) {
+    I_RANGE <- I_MAX
+  }
+  
+  TARGET_A_RANGE_ON_I <- I_RANGE * 0.8
+  m_abs <- TARGET_A_RANGE_ON_I / ABS_RANGE 
+  
+  I_CENTER <- (I_MAX + I_MIN) / 2
+  A_CENTER <- (ABS_MAX + ABS_MIN) / 2
+  c_abs <- I_CENTER - (m_abs * A_CENTER)
+  
+  plot_obj + 
+    geom_line(
+      data = specimen_proc_long,
+      aes(y = absorbance * m_abs + c_abs),
+      color = "grey", 
+      alpha = 0.6, 
+      linewidth = 0.7
+    ) +
+    scale_y_continuous(
+      name = plot_obj$labels$y,
+      sec.axis = sec_axis(
+        trans = ~ (. - c_abs) / m_abs, 
+        name = NULL,
+        breaks = NULL
+      )
+    ) +
+    theme_bw(base_size = 15) + 
+    theme(
+      axis.title.y.right = element_blank(),
+      axis.text.y.right = element_blank(),
+      axis.ticks.y.right = element_blank()
+    )
+}
+
+# Create base plots
+p1_lm <- ggplot(lm_pca_data, aes(x = wavenumber)) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#4477AA", alpha = 0.5) +
+  geom_line(aes(y = final_mean), color = "#4477AA") +
+  labs(y = "PCA Loadings\n(LM)", x = NULL) +
+  theme_bw(base_size = 15)
+
+p2_gam <- ggplot(gam_pca_data, aes(x = wavenumber)) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#4477AA", alpha = 0.5) +
+  geom_line(aes(y = final_mean), color = "#4477AA") +
+  labs(y = "PCA Loadings\n(GAM)", x = NULL) +
+  theme_bw(base_size = 15)
+
+p3_pls <- ggplot(pls_data, aes(x = wavenumber)) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#AA3377", alpha = 0.5) +
+  geom_line(aes(y = final_mean), color = "#AA3377") +
+  labs(y = "VIP Score\n(PLS)", x = NULL) +
+  theme_bw(base_size = 15)
+
+p4_xgb <- ggplot(xgb_data, aes(x = wavenumber)) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#228833", alpha = 0.5) +
+  geom_line(aes(y = final_mean), color = "#228833") +
+  labs(y = "Gain\n(XGB)", x = NULL) +
+  theme_bw(base_size = 15)
+
+p5_rf <- ggplot(rf_data, aes(x = wavenumber)) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#228833", alpha = 0.5) +
+  geom_line(aes(y = final_mean), color = "#228833") +
+  labs(y = "Permutation\n(RF)", x = expression(paste("Wavenumber (cm"^{-1}, ")"))) +
+  theme_bw(base_size = 15)
+
+# Add overlays
+p1_lm_final <- add_spectra_overlay(p1_lm, lm_pca_data) + 
+  theme(
+    axis.title.x = element_blank(), 
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+p2_gam_final <- add_spectra_overlay(p2_gam, gam_pca_data) + 
+  theme(
+    axis.title.x = element_blank(), 
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+p3_pls_final <- add_spectra_overlay(p3_pls, pls_data) + 
+  theme(
+    axis.title.x = element_blank(), 
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+p4_xgb_final <- add_spectra_overlay(p4_xgb, xgb_data) + 
+  theme(
+    axis.title.x = element_blank(), 
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+p5_rf_final <- add_spectra_overlay(p5_rf, rf_data) + 
+  theme(
+    axis.title.x = element_text(size = 15), 
+    axis.text.x = element_text(size = 15),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+# Combine
+final_combined_plot <- (p1_lm_final / p2_gam_final / p3_pls_final / p4_xgb_final / p5_rf_final) & 
+  scale_x_reverse(expand = expansion(mult = 0, add = 50))
+
+print(final_combined_plot)
+
+ggsave(
+  filename = paste0("Chapter 2/", "waveimportance_overlay_", region_prefix, "_", timestamp, ".png"),
+  plot = final_combined_plot,
+  width = 10,
+  height = 12,
+  dpi = 600
+)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# TABLES: MODEL PERFORMANCE ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+# Prepare table data
+table_data_full <- summary_table %>%
+  mutate(
+    Model = case_when(
+      # model_name == best_lm_name ~ "LM",
+      # model_name == best_gam_name ~ "GAM",
+      model_name == "PLS" ~ "PLS",
+      str_detect(model_name, "PLS-VIP") ~ "PLS-VIP",
+      model_name == "XGBoost" ~ "XGB",
+      model_name == "Random Forest" ~ "RF",
+      model_name == "Simple-LM (L+SW)" ~ "Simple LM",
+      model_name == "Simple-GAM (L+SW)" ~ "Simple GAM",
+      str_detect(model_name, "PCA-LM") ~ model_name,  # Keep all PCA-LM variants
+      str_detect(model_name, "PCA-GAM") ~ model_name, # Keep all PCA-GAM variants
+      TRUE ~ model_name
+    ),
+    ModelType = case_when(
+      model_type %in% c("PCA-LM", "PCA-GAM") ~ "PCA",
+      model_type %in% c("PLS", "PLS-VIP") ~ "PLS",
+      model_type %in% c("XGB", "RF") ~ "ML",
+      model_type == "Simple" ~ "Simple",
+      TRUE ~ model_type
+    )
+  ) %>%
+  arrange(RMSE)
+
+max_abs_bias_full <- max(abs(table_data_full$Bias))
+
+# Full colored table (all models)
+table_to_export_full <- table_data_full %>%
+  select(Model, RMSE, R2, Bias, RPD) %>%
+  gt() %>%
+  data_color(columns = RMSE, palette = c("#63BE7B", "#FFEB84", "#F8696B")) %>%
+  data_color(columns = R2, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  data_color(
+    columns = Bias, 
+    palette = c("#F8696B", "#63BE7B", "#F8696B"), 
+    domain = c(-max_abs_bias_full, 0, max_abs_bias_full)
+  ) %>%
+  data_color(columns = RPD, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  fmt_number(columns = c(RMSE, R2, Bias, RPD), decimals = 3) %>%
+  tab_options(
+    column_labels.border.bottom.width = px(2),
+    column_labels.border.bottom.color = "black",
+    table_body.hlines.color = "#ededed"
+  )
+
+# Add model type colors to Model column
+for (type_name in names(color_palette)) {
+  table_to_export_full <- table_to_export_full %>%
+    tab_style(
+      style = cell_fill(color = color_palette[[type_name]], alpha = 0.5),
+      locations = cells_body(
+        columns = Model, 
+        rows = table_data_full$ModelType == type_name
+      )
+    )
+}
+
+print(table_to_export_full)
+
+# Filtered table (best models only)
+table_data_filtered <- table_data_full %>%
+  filter(Model %in% c(best_lm_name, best_gam_name, "PLS", "PLS-VIP", "XGB", "RF", "Simple LM", "Simple GAM")) %>% 
+  # change rows with model_name == best_lm_name or model_name == best_gam_name models to "LM" and "GAM" respectively
+  mutate(
+    Model = case_when(
+      model_name == best_lm_name ~ "LM",
+      model_name == best_gam_name ~ "GAM",
+      TRUE ~ Model
+    )
+  )
+  
+
+max_abs_bias_filtered <- max(abs(table_data_filtered$Bias))
+
+filtered_table_final <- table_data_filtered %>%
+  select(Model, RMSE, R2, Bias, RPD) %>%
+  gt() %>%
+  data_color(columns = RMSE, palette = c("#63BE7B", "#FFEB84", "#F8696B")) %>%
+  data_color(columns = R2, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  data_color(
+    columns = Bias, 
+    palette = c("#F8696B", "#63BE7B", "#F8696B"), 
+    domain = c(-max_abs_bias_filtered, 0, max_abs_bias_filtered)
+  ) %>%
+  data_color(columns = RPD, palette = c("#F8696B", "#FFEB84", "#63BE7B")) %>%
+  fmt_number(columns = c(RMSE, R2, Bias, RPD), decimals = 3) %>%
+  tab_options(
+    column_labels.border.bottom.width = px(2),
+    column_labels.border.bottom.color = "black",
+    table_body.hlines.color = "#ededed"
+  )
+
+for (type_name in names(color_palette)) {
+  filtered_table_final <- filtered_table_final %>%
+    tab_style(
+      style = cell_fill(color = color_palette[[type_name]], alpha = 0.5),
+      locations = cells_body(
+        columns = Model, 
+        rows = table_data_filtered$ModelType == type_name
+      )
+    )
+}
+
+print(filtered_table_final)
+
+# Save tables
+gtsave(table_to_export_full, paste0("Chapter 2/", "results_all_", region_prefix, "_", timestamp, ".html"))
+gtsave(filtered_table_final, paste0("Chapter 2/", "results_filtered_", region_prefix, "_", timestamp, ".html"))
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# FIGURE: HATCH DATE COMPARISON ####
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+# Calculate hatch dates from predictions
+# Join with specimen metadata to get sample_date
+hatch_estimates <- predictions_df %>%
+  left_join(
+    df %>% dplyr::select(specimen, sample_date, hatch_date), 
+    by = "specimen"
+  ) %>%
+  mutate(
+    # Predicted hatch = sample date - predicted age
+    pred_hatch = sample_date - pred_age,
+    Model = case_when(
+      model_name == best_lm_name ~ "LM",
+      model_name == best_gam_name ~ "GAM",
+      model_name == "PLS" ~ "PLS",
+      str_detect(model_name, "PLS-VIP") ~ "PLS (VIP)",
+      model_name == "XGBoost" ~ "XGB",
+      model_name == "Random Forest" ~ "RF",
+      model_name == "Simple-LM (L+SW)" ~ "LM (Simple)",
+      model_name == "Simple-GAM (L+SW)" ~ "GAM (Simple)",
+      TRUE ~ NA_character_
+    ),
+    ModelType = case_when(
+      model_type %in% c("PCA-LM", "PCA-GAM") ~ "PCA",
+      model_type %in% c("PLS", "PLS-VIP") ~ "PLS",
+      model_type %in% c("XGB", "RF") ~ "ML",
+      model_type == "Simple" ~ "Simple",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Model))
+
+# Calculate median hatch date per specimen per model
+median_hatch_estimates <- hatch_estimates %>%
+  group_by(specimen, Model, ModelType, hatch_date) %>%
+  summarise(median_pred_hatch = median(pred_hatch, na.rm = TRUE), .groups = "drop")
+
+# Get unique true hatch dates
+true_hatch_dates <- df %>%
+  filter(!is.na(hatch_date)) %>%
+  pull(hatch_date)
+
+# K-S test and ECDF calculation
+calculate_ecdf_diff <- function(estimate_dates, true_dates) {
+  x_grid <- sort(unique(c(estimate_dates, true_dates)))
+  ecdf_estimate <- ecdf(estimate_dates)(x_grid)
+  ecdf_true <- ecdf(true_dates)(x_grid)
+  tibble(
+    hatch_date = x_grid, 
+    ecdf_difference = ecdf_estimate - ecdf_true
+  )
+}
+
+# Calculate K-S statistics for each model
+ks_results <- median_hatch_estimates %>%
+  group_by(Model, ModelType) %>%
+  summarise(
+    ks_data = list({
+      ks_test <- ks.test(median_pred_hatch, true_hatch_dates)
+      tibble(
+        D_statistic = ks_test$statistic,
+        p_value = ks_test$p.value
+      )
+    }),
+    .groups = "drop"
+  ) %>%
+  tidyr::unnest(ks_data)
+
+# Calculate ECDF differences
+ecdf_differences <- median_hatch_estimates %>%
+  group_by(Model, ModelType) %>%
+  summarise(
+    diff_data = list(calculate_ecdf_diff(median_pred_hatch, true_hatch_dates)),
+    .groups = "drop"
+  ) %>%
+  tidyr::unnest(diff_data) %>%
+  left_join(ks_results, by = c("Model", "ModelType")) %>%
+  mutate(
+    p_label = if_else(p_value < 0.001, "p < 0.001", sprintf("p = %.3f", p_value)),
+    ks_label = sprintf("D = %.3f\n%s", D_statistic, p_label),
+    Model = factor(Model, levels = c("LM", "GAM", "PLS", "PLS (VIP)", "XGB", "RF", "LM (Simple)", "GAM (Simple)"))
+  )
+
+# Create ECDF difference plot
+hatch_plot <- ggplot(ecdf_differences, aes(x = hatch_date, y = ecdf_difference)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_step(aes(color = ModelType, group = Model), linewidth = 0.9) +
+  geom_text(
+    aes(label = ks_label), 
+    x = -Inf, y = Inf, 
+    hjust = -0.1, vjust = 1.2,
+    size = 4, 
+    check_overlap = TRUE, 
+    lineheight = 0.9
+  ) +
+  scale_color_manual(values = color_palette, name = "Model Type") +
+  facet_wrap(~ Model, ncol = 4) +
+  labs(
+    x = "Hatch Date",
+    y = "ECDF Difference"
+  ) +
+  theme_bw(base_size = 18) +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(t = -5.5, unit = "pt"),
+    strip.background = element_rect(fill = "gray90")
+  )
+
+print(hatch_plot)
+
+ggsave(
+  filename = paste0("Chapter 2/", "hatch_comparison_", region_prefix, "_", timestamp, ".png"),
+  plot = hatch_plot,
+  width = 12,
+  height = 8,
+  dpi = 600,
+  bg = "white"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# # FIGURE 2: VARIABLE IMPORTANCE ####
+# #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# 
+# # Extract component numbers from best model names
+# lm_comp <- str_extract(best_lm_name, "\\d+")
+# gam_comp <- str_extract(best_gam_name, "\\d+")
+# 
+# # Define method names and order
+# final_method_order_importance <- c(
+#   "PCA Loadings (LM)",
+#   "PCA Loadings (GAM)",
+#   "VIP Score (PLS)",
+#   "Gain (XGB)",
+#   "Permutation (RF)"
+# )
+# 
+# # Prepare importance data
+# importance_summary <- importance_df %>%
+#   mutate(
+#     method = case_when(
+#       model_name == best_lm_name ~ "PCA Loadings (LM)",
+#       model_name == best_gam_name ~ "PCA Loadings (GAM)",
+#       model_name == "PLS-VIP" ~ "VIP Score (PLS)",
+#       model_name == "XGBoost" ~ "Gain (XGB)",
+#       model_name == "Random Forest" ~ "Permutation (RF)",
+#       TRUE ~ NA_character_
+#     )
+#   ) %>%
+#   filter(!is.na(method)) %>%
+#   group_by(method, wavenumber) %>%
+#   summarise(
+#     final_mean = mean(importance_mean, na.rm = TRUE),
+#     lower_bound = mean(importance_mean - 2*importance_sd, na.rm = TRUE),
+#     upper_bound = mean(importance_mean + 2*importance_sd, na.rm = TRUE),
+#     .groups = "drop"
+#   ) %>%
+#   mutate(method = factor(method, levels = final_method_order_importance))
+# 
+# # Extract data for each method
+# lm_pca_data <- filter(importance_summary, method == "PCA Loadings (LM)")
+# gam_pca_data <- filter(importance_summary, method == "PCA Loadings (GAM)")
+# pls_data <- filter(importance_summary, method == "VIP Score (PLS)")
+# xgb_data <- filter(importance_summary, method == "Gain (XGB)")
+# rf_data <- filter(importance_summary, method == "Permutation (RF)")
+# 
+# # Create individual plots
+# p1_lm <- ggplot(lm_pca_data, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#4477AA", alpha = 0.5) +
+#   geom_line(aes(y = final_mean), color = "#4477AA") +
+#   labs(y = "PCA Loadings\n(LM)", x = NULL) +
+#   theme_bw(base_size = 15) +
+#   theme(
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     axis.title.y = element_text(angle = 90, vjust = 0.5)
+#   )
+# 
+# p2_gam <- ggplot(gam_pca_data, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#4477AA", alpha = 0.5) +
+#   geom_line(aes(y = final_mean), color = "#4477AA") +
+#   labs(y = "PCA Loadings\n(GAM)", x = NULL) +
+#   theme_bw(base_size = 15) +
+#   theme(
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     axis.title.y = element_text(angle = 90, vjust = 0.5)
+#   )
+# 
+# p3_pls <- ggplot(pls_data, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#AA3377", alpha = 0.5) +
+#   geom_line(aes(y = final_mean), color = "#AA3377") +
+#   labs(y = "VIP Score\n(PLS)", x = NULL) +
+#   theme_bw(base_size = 15) +
+#   theme(
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     axis.title.y = element_text(angle = 90, vjust = 0.5)
+#   )
+# 
+# p4_xgb <- ggplot(xgb_data, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#228833", alpha = 0.5) +
+#   geom_line(aes(y = final_mean), color = "#228833") +
+#   labs(y = "Gain\n(XGB)", x = NULL) +
+#   theme_bw(base_size = 15) +
+#   theme(
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     axis.title.y = element_text(angle = 90, vjust = 0.5)
+#   )
+# 
+# p5_rf <- ggplot(rf_data, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), fill = "#228833", alpha = 0.5) +
+#   geom_line(aes(y = final_mean), color = "#228833") +
+#   labs(y = "Permutation\n(RF)", x = expression(paste("Wavenumber (cm"^{-1}, ")"))) +
+#   theme_bw(base_size = 15) +
+#   theme(axis.title.y = element_text(angle = 90, vjust = 0.5))
+# 
+# # Combine plots
+# final_importance_plot <- (p1_lm / p2_gam / p3_pls / p4_xgb / p5_rf) & 
+#   scale_x_reverse(expand = expansion(mult = 0, add = 50))
+# 
+# print(final_importance_plot)
+# 
+# ggsave(
+#   filename = paste0("Chapter 2/", "waveimportance_range_", region_prefix, "_", timestamp, ".png"), 
+#   plot = final_importance_plot,                              
+#   width = 10,                                     
+#   height = 12,
+#   dpi = 600                                      
+# )
+
+
+
+# Density comparison plot (True vs PLS-VIP)
+# true_hatch_df <- tibble(
+#   hatch_date = true_hatch_dates,
+#   Source = "Thin-Section"
+# )
+# 
+# pls_vip_hatch_df <- median_hatch_estimates %>%
+#   filter(Model == "PLS (VIP)") %>%
+#   select(hatch_date = median_pred_hatch) %>%
+#   mutate(Source = "FT-NIRS Prediction")
+# 
+# hatch_date_data <- bind_rows(true_hatch_df, pls_vip_hatch_df) %>%
+#   mutate(Source = factor(Source, levels = c("Thin-Section", "FT-NIRS Prediction")))
+# 
+# # Create custom date breaks
+# min_date <- as.Date(min(hatch_date_data$hatch_date, na.rm = TRUE), origin = "1970-01-01")
+# max_date <- as.Date(max(hatch_date_data$hatch_date, na.rm = TRUE), origin = "1970-01-01")
+# 
+# all_days <- seq(
+#   from = floor_date(min_date, "month"), 
+#   to = ceiling_date(max_date, "month"), 
+#   by = "day"
+# )
+# 
+# custom_date_breaks <- all_days[day(all_days) == 1 | day(all_days) == 15]
+# custom_date_breaks <- custom_date_breaks[
+#   custom_date_breaks >= floor_date(min_date, "month") & 
+#   custom_date_breaks <= ceiling_date(max_date, "month")
+# ]
+# 
+# if (length(custom_date_breaks) == 0) {
+#   custom_date_breaks <- c(min_date, max_date)
+# }
+# 
+# hatch_density_plot <- ggplot(hatch_date_data, aes(x = hatch_date, fill = Source)) +
+#   geom_density(alpha = 0.6, position = "identity") +
+#   scale_x_date(
+#     labels = scales::date_format("%b %d"), 
+#     breaks = custom_date_breaks,
+#     limits = c(min(custom_date_breaks), max(custom_date_breaks))
+#   ) +
+#   scale_fill_manual(
+#     values = c("Thin-Section" = "#ca0020", "FT-NIRS Prediction" = "#6ba2c2")
+#   ) +
+#   labs(
+#     x = "Hatch Date",
+#     y = "",
+#     fill = "Age Source"
+#   ) +
+#   theme_bw(base_size = 30) +
+#   theme(
+#     legend.position = "bottom",
+#     legend.margin = margin(t = -15, unit = "pt"),
+#     axis.text.y = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     axis.text.x = element_text(angle = 45, hjust = 1, size = 30)
+#   )
+# 
+# print(hatch_density_plot)
+# 
+# ggsave(
+#   filename = paste0("Chapter 2", "hatch_density_comparison_", region_prefix, "_", timestamp, ".png"),
+#   plot = hatch_density_plot,
+#   width = 10,
+#   height = 7,
+#   dpi = 600,
+#   bg = "white"
+# )
+# 
+# cat("\n✅ All visualizations and tables generated successfully!\n")
+```
+
+
+
+
+```{r}
+# =============================================================================
+# SECTION 9: VISUALIZATION
+# =============================================================================
+# 
+# library(ggplot2)
+# library(dplyr)
+# library(patchwork)
+# library(tidyr)
+# library(cli)
+# 
+# cli::cli_h1("Processing Data for Visualization")
+# 
+# # Load results (use whichever experiment was run)
+# all_cv_results <- lpw_cv_results
+# cv_metrics <- all_cv_results$all_cv_metrics
+# importance_df <- all_cv_results$all_cv_importance
+# predictions_df <- all_cv_results$all_cv_predictions
+# 
+# # --- 9.1: Identify Best Models ---
+# cli::cli_alert_info("Dynamically selecting best PCA models...")
+# 
+# summary_table <- cv_metrics %>%
+#   group_by(model_type, model_name) %>%
+#   summarize(
+#     RMSE = mean(RMSE, na.rm = TRUE),
+#     R2 = mean(R2, na.rm = TRUE),
+#     RPD = mean(RPD, na.rm = TRUE),
+#     Bias = mean(Bias, na.rm = TRUE),
+#     .groups = "drop"
+#   )
+# 
+# # Find best PCA-GAM and PCA-LM models by RMSE
+# best_gam_name <- summary_table %>%
+#   filter(model_type == "PCA-GAM") %>%
+#   arrange(RMSE) %>%
+#   dplyr::slice(1) %>%
+#   pull(model_name)
+# 
+# best_lm_name <- summary_table %>%
+#   filter(model_type == "PCA-LM") %>%
+#   arrange(RMSE) %>%
+#   dplyr::slice(1) %>%
+#   pull(model_name)
+# 
+# cat("Best PCA-GAM Model:", best_gam_name, "\n")
+# cat("Best PCA-LM Model:", best_lm_name, "\n")
+# 
+# # Define model list for plotting
+# models_to_plot <- c(
+#   best_gam_name,
+#   best_lm_name,
+#   "PLS",
+#   "PLS-VIP (>0.5)",  # Adjust threshold as needed
+#   "XGBoost",
+#   "Random Forest",
+#   "Simple-LM (L+SW)",
+#   "Simple-GAM (L+SW)"
+# )
+# 
+# 
+# # --- 9.2: Plot 1 - Metrics Boxplot (2x2 Grid) ---
+# cli::cli_h1("Generating Metrics Boxplot")
+# 
+# metrics_for_boxplot <- cv_metrics %>%
+#   filter(model_name %in% models_to_plot)
+# 
+# metrics_long <- metrics_for_boxplot %>%
+#   select(model_name, R2, RMSE, RPD, Bias) %>%
+#   pivot_longer(
+#     cols = c(R2, RMSE, RPD, Bias),
+#     names_to = "metric_name",
+#     values_to = "value"
+#   ) %>%
+#   mutate(
+#     metric_name = factor(metric_name, levels = c("RMSE", "R2", "RPD", "Bias"))
+#   )
+# 
+# p_metrics_boxplot <- ggplot(metrics_long, aes(y = model_name, x = value)) +
+#   geom_boxplot() +
+#   coord_flip() +
+#   facet_wrap(~metric_name, ncol = 2, scales = "free") +
+#   labs(
+#     title = "Model Performance (50 runs)",
+#     x = "Model",
+#     y = "Metric Value"
+#   ) +
+#   theme_bw(base_size = 12) +
+#   theme(
+#     strip.text = element_text(face = "bold"),
+#     strip.background = element_blank(),
+#     axis.text.y = element_text(size = 9)
+#   )
+# 
+# print(p_metrics_boxplot)
+# 
+# 
+# # --- 9.3: Plot 2 - Variable Importance ---
+# cli::cli_h1("Generating Importance Plot")
+# 
+# models_to_plot_imp <- c(
+#   "PLS-VIP",
+#   "XGBoost",
+#   "Random Forest",
+#   best_gam_name
+# )
+# 
+# importance_summary <- importance_df %>%
+#   group_by(model_name, wavenumber) %>%
+#   summarize(
+#     mean_importance = mean(importance_mean, na.rm = TRUE),
+#     sd_importance = mean(importance_sd, na.rm = TRUE),
+#     .groups = "drop"
+#   )
+# 
+# importance_to_plot <- importance_summary %>%
+#   filter(model_name %in% models_to_plot_imp) %>%
+#   mutate(wavenumber = as.numeric(wavenumber)) %>%
+#   mutate(
+#     ymin_raw = mean_importance - (2 * sd_importance),
+#     ymax_raw = mean_importance + (2 * sd_importance)
+#   ) %>%
+#   group_by(model_name) %>%
+#   mutate(
+#     min_val = min(ymin_raw, na.rm = TRUE),
+#     max_val = max(ymax_raw, na.rm = TRUE),
+#     range = max_val - min_val,
+#     importance_scaled = ifelse(range == 0, 0.5, (mean_importance - min_val) / range),
+#     ymin_scaled = ifelse(range == 0, 0.5, (ymin_raw - min_val) / range),
+#     ymax_scaled = ifelse(range == 0, 0.5, (ymax_raw - min_val) / range)
+#   ) %>%
+#   ungroup() %>%
+#   mutate(model_name = factor(model_name, levels = models_to_plot_imp))
+# 
+# p_importance <- ggplot(importance_to_plot, aes(x = wavenumber)) +
+#   geom_ribbon(aes(ymin = ymin_scaled, ymax = ymax_scaled, fill = model_name), alpha = 0.5) +
+#   geom_line(aes(y = importance_scaled, color = model_name), linewidth = 1) +
+#   scale_x_reverse(name = expression(paste("Wavenumber ", cm^-1))) +
+#   scale_y_continuous(name = "Normalized Importance (0-1)") +
+#   scale_color_viridis_d(aesthetics = c("color", "fill")) +
+#   facet_wrap(~model_name, ncol = 1, scales = "free_y") +
+#   theme_bw(base_size = 14) +
+#   theme(
+#     legend.position = "none",
+#     strip.text = element_text(face = "bold"),
+#     strip.background = element_blank()
+#   ) +
+#   ggtitle("Mean Model Variable Importance (± 2 SD across all runs)")
+# 
+# print(p_importance)
+# 
+# 
+# # --- 9.4: Plot 3 - Predictions ---
+# cli::cli_h1("Generating Prediction Plot")
+# 
+# median_ages <- predictions_df %>%
+#   group_by(model_name, specimen) %>%
+#   summarize(pred_age = median(pred_age, na.rm = TRUE), .groups = "drop")
+# 
+# median_ages <- median_ages %>%
+#   left_join(
+#     predictions_df %>% select(specimen, obs_age) %>% distinct(),
+#     by = "specimen"
+#   )
+# 
+# predictions_to_plot <- median_ages %>%
+#   filter(model_name %in% models_to_plot) %>%
+#   mutate(model_name = factor(model_name, levels = models_to_plot))
+# 
+# p_predictions <- ggplot(predictions_to_plot, aes(x = obs_age, y = pred_age)) +
+#   geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", linewidth = 1) +
+#   geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 0.75) +
+#   geom_point(alpha = 0.6) +
+#   facet_wrap(~model_name, ncol = 4) +
+#   labs(
+#     x = "Observed Age (days)",
+#     y = "Predicted Age (days)",
+#     title = "Median Predicted Age vs. Observed Age (across all runs)"
+#   ) +
+#   theme_bw(base_size = 12) +
+#   theme(
+#     strip.text = element_text(face = "bold", size = 9),
+#     strip.background = element_blank()
+#   )
+# 
+# print(p_predictions)
+# 
+# # =============================================================================
+# # END OF SCRIPT
+# # =============================================================================
+```
+

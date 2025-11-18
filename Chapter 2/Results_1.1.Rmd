@@ -1,0 +1,582 @@
+Load Packages/Data
+
+```{r}
+# =============================================================================
+#
+# FT-NIRS AGE PREDICTION - Results
+#
+# This script plots and analyzes results from my FT-NIRS models.  I have 5 distinct sets of models:
+#   1. All regions (LPW, Shumagin & Kodiak)
+#   2. Wild Regions (Shumagin & Kodiak)
+#   3. LPW only
+#   4. Shumagin only
+#   5. Kodiak only 
+#
+# Each set of models uses a repeat 10-fold CV approach.  If models are using multiple regions of specimens,
+# 10-fold CV splits are calculated for each region seperately with createFolds() in caret and `read_age`
+# as the variable to try and make fair splits for.  Each of the sets uses the following model types:
+#
+#   1. PCA-based models (best 10 Linear & best 10 GAM, using the first 10 PC's)
+#   2. Partial Least Squares & PLs models with VIP filtering < 0.5
+#   3. XGBoost
+#   4. Random Forest
+#   5. Simple biological models (Length + Structure Weight)
+#
+#
+# =============================================================================
+
+# =============================================================================
+# SECTION 1: SETUP & DATA LOADING
+# =============================================================================
+
+# --- Load Required Packages ---
+library(pacman)
+p_load(
+  arrow,
+  caret,        # Machine learning utilities & preprocessing
+  cowplot,      # Plot arrangements
+  data.table,
+  doParallel,   # Parallel backend
+  doSNOW,       # Parallel progress tracking
+  furrr,        # Parallel mapping with future
+  future,       # Parallel computing framework
+  gridExtra,    # Additional plot utilities
+  mdatools,     # PLS modeling
+  mgcv,         # GAM modeling
+  MuMIn,        # Model selection (dredge)
+  parallel,     # Core parallel utilities
+  patchwork,    # Plot composition
+  prospectr,    # Spectral preprocessing (Savitzky-Golay)
+  purrr,        # Functional programming tools
+  ranger,       # Random Forest implementation
+  readxl,       # Excel file reading
+  stringr,      # String manipulation
+  tidyr,        # Data tidying
+  tidyverse,    # Core tidyverse packages
+  viridis,      # Color scales
+  xgboost       # XGBoost modeling
+)
+
+# --- Load and Prepare Raw Data ---
+df_raw <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS") %>% 
+  filter(complete.cases(read_age))
+
+# Consolidate regional groupings
+df_raw <- df_raw %>%
+  mutate(
+    region = case_when(
+      region %in% c("E Shumagins", "W Shumagins") ~ "Shumagin",
+      region %in% c("N Kodiak", "S Kodiak") ~ "Kodiak",
+      TRUE ~ region
+    )
+  )
+
+# Create region-specific datasets
+kodiak_raw <- df_raw %>% filter(region == "Kodiak")
+shumagin_raw <- df_raw %>% filter(region == "Shumagin")
+lpw_raw <- df_raw %>% filter(region == "LPW")
+```
+
+
+
+```{r}
+
+# =============================================================================
+# SECTION 2: UTILITY FUNCTIONS
+# =============================================================================
+
+# --- 2.1: Data Manipulation Functions ---
+
+#' Find spectral column names
+#' 
+#' Identifies columns containing wavenumber data (numeric column names)
+#' @param df Dataframe containing spectral data
+#' @return Character vector of spectral column names
+find_cols <- function(df) {
+  names(df)[grepl("^\\d", names(df))]
+}
+
+#' Convert spectral data to long format
+#' 
+#' Transforms wide-format spectral data into long format for visualization
+#' @param df Dataframe with spectral columns
+#' @return Long-format dataframe with 'name' (wavenumber) and 'value' columns
+make_long <- function(df) {
+  speccols <- find_cols(df)
+  df_long <- df %>%
+    tidyr::pivot_longer(cols = speccols) %>%
+    mutate(name = as.numeric(as.character(name)))
+  return(df_long)
+}
+
+# --- 2.3: Spectral Preprocessing Functions ---
+
+#' Apply Savitzky-Golay smoothing filter
+#' 
+#' @param df Dataframe with spectral columns
+#' @param m Derivative order (0 = smoothing only, 1 = first derivative, etc.)
+#' @param p Polynomial order
+#' @param w Window size (must be odd)
+#' @return Dataframe with filtered spectral data
+sg_filter <- function(df, m, p, w) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  sg_matrix <- prospectr::savitzkyGolay(df[, speccols], m = m, p = p, w = w)
+  new_speccols <- find_cols(sg_matrix)
+  names(sg_matrix) <- new_speccols
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(sg_matrix)))
+}
+
+#' Apply Standard Normal Variate (SNV) transformation
+#' 
+#' Centers and scales each spectrum to correct for scatter effects
+#' @param df Dataframe with spectral columns
+#' @return Dataframe with SNV-transformed spectral data
+snv_filter <- function(df) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  snv_matrix <- prospectr::prep.snv(as.matrix(df[, speccols]))
+  return(dplyr::bind_cols(df[, metacols], as.data.frame(snv_matrix)))
+}
+
+#' Filter spectral data by wavelength threshold
+#' 
+#' Removes wavenumbers above a specified threshold
+#' @param df Dataframe with spectral columns
+#' @param wave Maximum wavenumber to retain
+#' @return Dataframe with filtered wavelength range
+wave_filter <- function(df, wave) {
+  speccols <- find_cols(df)
+  metacols <- setdiff(names(df), speccols)
+  keep_me <- as.numeric(speccols) <= wave
+  speccols_keep <- speccols[keep_me]
+  return(df[, c(metacols, speccols_keep)])
+}
+
+# --- 2.7: Visualization Functions ---
+
+#' Create spectral plot
+#' 
+#' Generates a line plot of absorbance vs wavenumber for multiple specimens
+#' @param df Dataframe with spectral data
+#' @param color Column name (unquoted) to use for coloring lines
+#' @return ggplot object
+spec.fig <- function(df, color) {
+  mydf <- make_long(df)
+  color_col <- rlang::enquo(color) 
+  
+  mydf_sorted <- mydf %>% 
+    dplyr::arrange(specimen, name) 
+  
+  ggplot(mydf_sorted) +
+    geom_path(aes(x = name, y = value, color = !!color_col, group = specimen)) +
+    scale_x_reverse() +
+    scale_color_viridis() +
+    labs(y = "Absorbance", x = expression(paste("Wavenumber ", cm^-1))) + 
+    theme_bw(base_size = 16)
+}
+```
+
+```{r}
+# --- : Preprocess Data ---
+cli::cli_h1("Preprocessing Data")
+
+kodiak_proc <- sg_filter(kodiak_raw, 1, 3, 19)
+shumagin_proc <- sg_filter(shumagin_raw, 1, 3, 19)
+lpw_proc <- sg_filter(lpw_raw, 1, 3, 19)
+wild_proc <- bind_rows(kodiak_proc, shumagin_proc)
+all_proc <- bind_rows(kodiak_proc, shumagin_proc, lpw_proc)
+
+```
+
+# density plot - ages for each region
+
+Trying to demonstrate that specimens are wildly different ages so combined models likely don't make sense.
+
+```{r}
+density_plot <- ggplot(all_proc, aes(x = read_age, fill = region)) + 
+  geom_density(alpha = 0.6) +
+  scale_fill_viridis(discrete = T) + 
+  theme_bw(base_size = 16) + 
+    labs(
+    x = "Thin Section Age (Days)",
+    y = "Proportion",
+    fill = "Region"
+  )
+density_plot
+# ggsave("Chapter 2/age_comparisons_density.png", density_plot, width = 9, height = 6, dpi = 300)
+```
+
+I want to make age prediction scatterplots for each region from region-only, ALL and wild (for kod/shu)
+
+```{r}
+# =============================================================================
+#
+# THESIS FIGURE: MODEL RUN COMPARISON (BEST MODELS ONLY)
+#
+# =============================================================================
+
+library(arrow)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# --- 1. CONFIGURATION ---
+
+# Set the base path to your results
+BASE_PATH <- "C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/Chapter 2/temp_arrow_files"
+
+# Define the paths for each of your 5 runs
+# (Paste the full folder names from your list)
+RUN_PATHS <- list(
+  All = file.path(BASE_PATH, "all_20251112_083140"),
+  Wild = file.path(BASE_PATH, "wild_20251112_124214"),
+  Kodiak = file.path(BASE_PATH, "kod_20251112_145212"),
+  Shumagin = file.path(BASE_PATH, "shu_20251112_161318"),
+  LPW = file.path(BASE_PATH, "LPW_20251113_144252")
+)
+
+# Define the same color palette from your other plots
+COLOR_PALETTE <- c(
+  "PCA" = "#4477AA",
+  "PLS" = "#AA3377",
+  "ML" = "#228833",
+  "Simple" = "#CCBB44"
+)
+
+# --- 2. HELPER FUNCTION (MEMORY-SAFE LOADER) ---
+
+#' Loads and summarizes predictions from a single model run
+#'
+#' This function opens the Arrow dataset *lazily*, calculates the
+#' median prediction for each specimen/model, and *then* collects
+#' the small, summarized dataframe into memory.
+#'
+#' @param run_path Path to the model run's root folder (e.g., ".../all_...")
+#' @param run_name A short name to identify the run (e.g., "All")
+#' @return A summarized tibble with median predictions
+#'
+load_and_summarize_preds <- function(run_path, run_name) {
+  message(paste("Processing run:", run_name))
+  
+  pred_path <- file.path(run_path, "predictions")
+  
+  # 1. Open dataset lazily (uses 0 RAM)
+  lazy_preds <- open_dataset(pred_path, format = "feather")
+  
+  # 2. Define the lazy summary
+  summarized_data_lazy <- lazy_preds %>%
+    group_by(specimen, model_name, model_type, obs_age) %>%
+    summarise(median_pred_age = median(pred_age, na.rm = TRUE), .groups = "drop")
+  
+  # 3. Collect() the SMALL summarized data (low RAM)
+  summarized_data <- collect(summarized_data_lazy)
+  
+  # 4. Add the 'model_run' label and return
+  summarized_data %>%
+    mutate(model_run = run_name)
+}
+
+# --- 3. GET SPECIMEN-REGION LOOKUP ---
+
+# We need to get the 'region' for each 'specimen'.
+if (!exists("all_proc")) {
+  message("Warning: 'all_proc' dataframe not found. Loading from RDS...")
+  # Fallback to load the raw data
+  df_raw <- readRDS("RDS_dataframes/combined_IBM_LPW_raw.RDS") %>% 
+    filter(complete.cases(read_age))
+  
+  df_raw <- df_raw %>%
+    mutate(
+      region = case_when(
+        region %in% c("E Shumagins", "W Shumagins") ~ "Shumagin",
+        region %in% c("N Kodiak", "S Kodiak") ~ "Kodiak",
+        TRUE ~ region
+      )
+    )
+  all_proc <- df_raw # Use the raw df for the lookup
+}
+
+specimen_region_lookup <- all_proc %>%
+  select(specimen, region) %>%
+  distinct()
+
+
+# --- 4. LOAD AND COMBINE ALL RUNS ---
+
+# Loop over our path list and run the loader function for each
+all_summarized_preds_list <- purrr::imap(RUN_PATHS, load_and_summarize_preds)
+
+# Combine the 5 tibbles into one big one
+all_summarized_preds <- bind_rows(all_summarized_preds_list)
+
+# Join with region data
+final_data_for_plotting <- all_summarized_preds %>%
+  left_join(specimen_region_lookup, by = "specimen")
+
+# --- 5. LOAD SUMMARY & FIND BEST MODELS ---
+
+results_ALL <- read.csv("C:/Users/poopm/Thesis Writing/Github/LPW_FT-NIRS/Chapter 2/results_unfiltered.csv")
+
+# We must filter for finite RMSE values *before* slicing,
+# otherwise NA/Inf values will cause groups to be dropped.
+best_models_unstandardized <- results_ALL %>%
+  filter(is.finite(RMSE)) %>%
+  group_by(model_run) %>%
+  slice_min(order_by = RMSE, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(model_run, model_name, RMSE)
+
+message("Found the following best models (unstandardized):")
+print(best_models_unstandardized)
+
+
+# --- 6. STANDARDIZE & FILTER PREDICTIONS ---
+#
+# This section standardizes the names from BOTH the Arrow data and the CSV
+# data to a common format *before* joining them.
+#
+# 1. Standardize names from the ARROW data (final_data_for_plotting)
+preds_standardized <- final_data_for_plotting %>%
+  mutate(
+    # Create the new, simple 'Model' column
+    Model = case_when(
+      str_detect(model_name, "PCA-LM") ~ model_name, # Keep full PCA-LM names
+      str_detect(model_name, "PCA-GAM") ~ model_name, # Keep full PCA-GAM names
+      model_name == "PLS" ~ "PLS",
+      str_detect(model_name, "PLS-VIP") ~ "PLS-VIP", # Standardize to "PLS-VIP"
+      model_name == "XGBoost" ~ "XGB",             # Standardize to "XGB"
+      model_name == "Random Forest" ~ "RF",         # Standardize to "RF"
+      model_name == "Simple-LM (L+SW)" ~ "Simple-LM",   # Standardize to "Simple-LM"
+      model_name == "Simple-GAM (L+SW)" ~ "Simple-GAM", # Standardize to "Simple-GAM"
+      TRUE ~ model_name
+    ),
+    ModelType = case_when(
+      str_detect(Model, "PCA-LM") | str_detect(Model, "PCA-GAM") ~ "PCA",
+      Model %in% c("PLS", "PLS-VIP") ~ "PLS",
+      Model %in% c("XGB", "RF") ~ "ML",
+      Model %in% c("Simple-LM", "Simple-GAM") ~ "Simple",
+      TRUE ~ model_type
+    )
+  ) %>%
+  filter(!is.na(ModelType)) %>%
+  # Select only the columns we need for the join
+  select(specimen, obs_age, median_pred_age, model_run, region, Model, ModelType)
+
+# 2. Standardize names from the CSV data (best_models)
+best_models_standardized <- best_models_unstandardized %>%
+  mutate(
+    # Create the new, simple 'Model' column
+    Model = case_when(
+      model_name == "Simple LM" ~ "Simple-LM",
+      model_name == "Simple GAM" ~ "Simple-GAM",
+      # All others (XGB, RF, PLS, PLS-VIP, PCA-GAM 1, etc.)
+      # already match the simple names from the CSV.
+      TRUE ~ model_name
+    )
+  ) %>%
+  # We join on the NEW 'Model' column, not the old 'model_name'
+  select(model_run, Model, RMSE)
+
+message("Standardized best models:")
+print(best_models_standardized)
+
+# 3. Join the two standardized tables
+# This will join `(model_run="All", Model="XGB")`
+# with `(model_run="All", Model="XGB")`
+final_data_cleaned <- preds_standardized %>%
+  inner_join(best_models_standardized, by = c("model_run", "Model"))
+
+message(paste(
+  "Join successful. Final filtered data has",
+  nrow(final_data_cleaned), "rows."
+))
+print(unique(final_data_cleaned$model_run))
+
+
+# 4. Set factor levels for plotting
+final_type_order <- c("PCA", "PLS", "ML", "Simple")
+
+final_data_cleaned <- final_data_cleaned %>%
+  mutate(
+    ModelType = factor(ModelType, levels = final_type_order)
+  )
+```
+
+
+```{r}
+# --- 7. METRIC & PLOTTING FUNCTIONS ---
+
+# --- Helper functions for metric calculation ---
+calculate_rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2, na.rm = TRUE))
+}
+
+calculate_r2 <- function(obs, pred) {
+  TSS <- sum((obs - mean(obs, na.rm = TRUE))^2, na.rm = TRUE)
+  RSS <- sum((obs - pred)^2, na.rm = TRUE)
+  1 - (RSS / TSS)
+}
+
+calculate_bias <- function(obs, pred) {
+  mean(pred - obs, na.rm = TRUE)
+}
+
+
+#' Creates a comparison scatter plot grid
+#'
+#' @param plot_data The data to plot (already filtered)
+#' @param title_text The main title for the plot
+#' @param run_order A vector of strings for the row order (e.g., c("All", "Wild"))
+#'
+
+create_comparison_plot <- function(plot_data, title_text, run_order) {
+  
+  # Create a new label for the facet strips that includes the model name
+  plot_data_labeled <- plot_data %>%
+    # Note: 'Model' is the simplified name, e.g., "XGB"
+    mutate(
+      facet_label = paste0("Trained with: ", model_run, " (", Model, ")"),
+      facet_label = factor(facet_label, levels = unique(facet_label[order(factor(model_run, levels = run_order))]))
+    )
+  
+  # --- NEW: Calculate metrics for text labels ---
+  metric_labels <- plot_data_labeled %>%
+    group_by(facet_label) %>%
+    summarise(
+      plot_rmse = calculate_rmse(obs_age, median_pred_age),
+      plot_r2 = calculate_r2(obs_age, median_pred_age),
+      plot_bias = calculate_bias(obs_age, median_pred_age)
+    ) %>%
+    mutate(
+      # Create the formatted text string for the label
+      label_string = sprintf(
+        "RMSE: %.2f\nR²: %.2f\nBias: %.2f",
+        plot_rmse, plot_r2, plot_bias
+      )
+    )
+
+  # --- Main Plot ---
+  ggplot(plot_data_labeled, aes(x = obs_age, y = median_pred_age)) +
+    # 1:1 line
+    geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+    # Points
+    geom_point(color = "black", alpha = 0.7, size = 3) +
+    # Line of best fit
+    geom_smooth(method = "lm", se = F, color = "red", linetype = "dotted", linewidth = 0.8) +
+    
+    # --- NEW: Add the text labels ---
+    geom_text(
+      data = metric_labels,
+      aes(label = label_string),
+      x = -Inf, y = Inf, # Position in top-left corner
+      hjust = -0.1,       # Nudge right
+      vjust = 1.2,        # Nudge down
+      size = 5,
+      lineheight = 0.9
+    ) +
+    # Facet by the new combined label, in a single column
+    facet_wrap(~ facet_label, ncol = 1) +
+    labs(
+      title = title_text,
+      x = "Thin Section Age (Days)",
+      y = "Median Predicted Age (Days)"
+    ) +
+    theme_bw(base_size = 17) +
+    theme(
+      legend.position = "bottom",
+      strip.text = element_text(face = "bold", size = 15),
+      strip.background = element_rect(fill = "gray90")
+    )
+}
+```
+
+
+```{r}
+# --- 8. GENERATE AND SAVE PLOTS ---
+#
+# PLOT 1: KODIAK SPECIMENS
+#
+plot_data_kod <- final_data_cleaned %>%
+  filter(
+    region == "Kodiak",
+    model_run %in% c("All", "Wild", "Kodiak")
+  )
+
+# Define the row order for the plot
+kod_run_order <- c("All", "Wild", "Kodiak")
+
+plot_kod <- create_comparison_plot(
+  plot_data_kod,
+  "Kodiak Specimen Predictions",
+  kod_run_order
+)
+
+print(plot_kod)
+# ggsave(
+#   "Chapter 2/comparison_plot_kodiak_best.png",
+#   plot_kod,
+#   width = 8, height = 15, dpi = 300 # Narrower, taller
+# )
+
+
+#
+# PLOT 2: SHUMAGIN SPECIMENS
+#
+plot_data_shu <- final_data_cleaned %>%
+  filter(
+    region == "Shumagin",
+    model_run %in% c("All", "Wild", "Shumagin")
+  )
+
+shu_run_order <- c("All", "Wild", "Shumagin") # <-- Corrected typo
+
+plot_shu <- create_comparison_plot(
+  plot_data_shu,
+  "Shumagin Specimen Predictions",
+  shu_run_order
+)
+
+print(plot_shu)
+# ggsave(
+#   "Chapter 2/comparison_plot_shumagin_best.png",
+#   plot_shu,
+#   width = 8, height = 15, dpi = 300 # Narrower, taller
+# )
+
+
+#
+# PLOT 3: LPW SPECIMENS
+#
+plot_data_lpw <- final_data_cleaned %>%
+  filter(
+    region == "LPW",
+    model_run %in% c("All", "LPW")
+  )
+
+lpw_run_order <- c("All", "LPW")
+
+plot_lpw <- create_comparison_plot(
+  plot_data_lpw,
+  "LPW Specimen Predictions",
+  lpw_run_order
+)
+
+print(plot_lpw)
+# ggsave(
+#   "Chapter 2/comparison_plot_lpw_best.png",
+#   plot_lpw,
+#   width = 8, height = 10, dpi = 300 # Narrower, shorter (2 rows)
+# )
+
+message("All comparison plots generated and saved.")
+```
+
+
+I'm thinking of using a table that shows model metrics for the best of all types that includes, model type, which set of models it came from.
+
+
+```{r}
+
+```
+

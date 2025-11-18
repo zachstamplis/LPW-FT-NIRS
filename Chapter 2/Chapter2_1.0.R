@@ -1,3 +1,4 @@
+library(mdatools)
 library(dplyr)
 library(lubridate)
 library(ggplot2)
@@ -47,9 +48,9 @@ IBM <- IBM %>%
 rm(region_meta)
 
 df_combined_raw <- rbind(LPW, IBM)
-df_combined_raw <- temp
+# df_combined_raw <- temp
 
-temp <- df_combined_raw
+# temp <- df_combined_raw
 # saveRDS(df_combined_raw, "combined_IBM_LPW_raw.RDS")
 # rm(IBM, LPW)
 
@@ -129,7 +130,7 @@ quickproc <- function(df, speccols, m, p, w) {
 }
 
 
-# TRY SNV and PRPROCESSING
+# TRY SNV and PRPROCESSING - copmbined dataframes
 speccols <- names(df_combined_raw)[grepl("^\\d", names(df_combined_raw))]
 
 
@@ -191,7 +192,7 @@ spec.fig(testing4_long, read_age)
 
 
 
-# LETS TRY COMBINING 2 AND 4
+# LETS TRY COMBINING 2 AND 4 (SNV + SG)
 
 combine_test <- rbind(testing2, testing4)
 speccols_combined <- spec_col(combine_test)
@@ -201,6 +202,8 @@ combine_test_long <- combine_test_long %>%
 
 
 spec.fig(combine_test_long, read_age)
+
+
 
 
 
@@ -586,7 +589,7 @@ plot_snv <- plot_processed_spectra(df_snv, color = read_age) +
 print(plot_snv)
 
 
-# Example 3: *** THE FIX ***
+# Example 3: 
 # Apply SG Smoothing FIRST, then apply SNV
 df_fix <- preprocess_spectra(df_combined_raw, speccols,
                              apply_sg_smooth = TRUE,
@@ -610,3 +613,4 @@ df_all <- preprocess_spectra(df_combined_raw, speccols,
 plot_all <- plot_processed_spectra(df_all, color = read_age) +
   ggtitle("Cutoff -> Smooth -> SNV -> 1st Derivative")
 print(plot_all)
+ggplotly(plot_all)

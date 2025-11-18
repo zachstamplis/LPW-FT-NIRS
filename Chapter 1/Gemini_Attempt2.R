@@ -389,8 +389,11 @@ run_xgb_models_single <- function(calibrate, testing, fold_id, best_params_xgb) 
     components = NA_real_ 
   )
   
-  r2 <- cor(preds, y_test)^2
-  rmse_val <- sqrt(mean((preds - y_test)^2))
+  
+  RSS <- sum((testing$read_age - preds)^2)
+  TSS <- sum((testing$read_age - mean(testing$read_age))^2)
+  r2 = 1 - (RSS / TSS)
+  rmse_val <- caret::RMSE(pred = preds, obs = testing$read_age)
   
   results_df <- data.frame(
     Fold = fold_id,
@@ -615,68 +618,68 @@ if (RUN_PCA_MODELS) {
 
 
 ### UNCOMMENT TO SAVE PC'S USED
-# Direct access to the 'formula' element for all GAM models
-gam_formulas_direct <- lapply(top10_gam_models, `[[`, "formula")
-# 1. Get the formulas (from the previous step)
-gam_formulas <- lapply(top10_gam_models, formula)
-# 2. Extract and format the predictor names for each model
-gam_predictors_list <- lapply(names(gam_formulas), function(model_id) {
-  # Get the terms object from the formula
-  model_terms <- terms(gam_formulas[[model_id]])
-  
-  # Get all predictor names (e.g., "s(PC1, k = 4)")
-  predictors <- attr(model_terms, "term.labels")
-  
-  # Extract just the "PC1", "PC3", etc.
-  pc_parts <- stringr::str_extract(predictors, "PC\\d+")
-  
-  # Extract just the numbers "1", "3", etc.
-  pc_numbers <- gsub("PC", "", pc_parts)
-  
-  # Create a row for the data frame
-  data.frame(
-    Model_ID = model_id,
-    Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
-  )
-})
-# 3. Combine the list of data frames into a single table
-gam_predictors_table <- do.call(rbind, gam_predictors_list)
-# Print the resulting table
-print("Top 10 GAM Models Predictor Table:")
-print(gam_predictors_table)
-
-
-# 1. Get the formulas (from the previous step)
-lm_formulas <- lapply(top10_lm_models, formula)
-
-# 2. Extract and format the predictor names for each model
-lm_predictors_list <- lapply(names(lm_formulas), function(model_id) {
-  # Get the terms object from the formula
-  model_terms <- terms(lm_formulas[[model_id]])
-  
-  # Get all predictor names (e.g., "PC1", "PC3")
-  predictors <- attr(model_terms, "term.labels")
-  
-  # Extract just the numbers "1", "3", etc.
-  pc_numbers <- gsub("PC", "", predictors)
-  
-  # Create a row for the data frame
-  data.frame(
-    Model_ID = model_id,
-    Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
-  )
-})
-
-# 3. Combine the list of data frames into a single table
-lm_predictors_table <- do.call(rbind, lm_predictors_list)
-
-# Print the resulting table
-print("Top 10 LM Models Predictor Table:")
-print(lm_predictors_table)
-
-timestamp <- format(Sys.Date(), "%Y-%m-%d")
-saveRDS(gam_predictors_table, paste0("Chapter 1/", "LPW_", "GAM_PCsused_", timestamp, ".RDS"))
-saveRDS(lm_predictors_table,  paste0("Chapter 1/", "LPW_", "LM_PCsused_", timestamp, ".RDS"))
+# # Direct access to the 'formula' element for all GAM models
+# gam_formulas_direct <- lapply(top10_gam_models, `[[`, "formula")
+# # 1. Get the formulas (from the previous step)
+# gam_formulas <- lapply(top10_gam_models, formula)
+# # 2. Extract and format the predictor names for each model
+# gam_predictors_list <- lapply(names(gam_formulas), function(model_id) {
+#   # Get the terms object from the formula
+#   model_terms <- terms(gam_formulas[[model_id]])
+# 
+#   # Get all predictor names (e.g., "s(PC1, k = 4)")
+#   predictors <- attr(model_terms, "term.labels")
+# 
+#   # Extract just the "PC1", "PC3", etc.
+#   pc_parts <- stringr::str_extract(predictors, "PC\\d+")
+# 
+#   # Extract just the numbers "1", "3", etc.
+#   pc_numbers <- gsub("PC", "", pc_parts)
+# 
+#   # Create a row for the data frame
+#   data.frame(
+#     Model_ID = model_id,
+#     Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
+#   )
+# })
+# # 3. Combine the list of data frames into a single table
+# gam_predictors_table <- do.call(rbind, gam_predictors_list)
+# # Print the resulting table
+# print("Top 10 GAM Models Predictor Table:")
+# print(gam_predictors_table)
+# 
+# 
+# # 1. Get the formulas (from the previous step)
+# lm_formulas <- lapply(top10_lm_models, formula)
+# 
+# # 2. Extract and format the predictor names for each model
+# lm_predictors_list <- lapply(names(lm_formulas), function(model_id) {
+#   # Get the terms object from the formula
+#   model_terms <- terms(lm_formulas[[model_id]])
+# 
+#   # Get all predictor names (e.g., "PC1", "PC3")
+#   predictors <- attr(model_terms, "term.labels")
+# 
+#   # Extract just the numbers "1", "3", etc.
+#   pc_numbers <- gsub("PC", "", predictors)
+# 
+#   # Create a row for the data frame
+#   data.frame(
+#     Model_ID = model_id,
+#     Predictors = paste(pc_numbers, collapse = ", ") # Combine all into a single string
+#   )
+# })
+# 
+# # 3. Combine the list of data frames into a single table
+# lm_predictors_table <- do.call(rbind, lm_predictors_list)
+# 
+# # Print the resulting table
+# print("Top 10 LM Models Predictor Table:")
+# print(lm_predictors_table)
+# 
+# timestamp <- format(Sys.Date(), "%Y-%m-%d")
+# saveRDS(gam_predictors_table, paste0("Chapter 1/", "LPW_", "GAM_PCsused_", timestamp, ".RDS"))
+# saveRDS(lm_predictors_table,  paste0("Chapter 1/", "LPW_", "LM_PCsused_", timestamp, ".RDS"))
 
 
 
@@ -774,6 +777,10 @@ final_predictions_df <- map_dfr(parallel_results_list, "predictions")
 gc()
 
 
+temp1 <- final_results_summary
+temp2 <- final_importance_summary
+temp3 <- final_predictions_df
+
 # --- 6. SIMPLE MODELS (OPTIONAL) ---
 # =============================================================================
 if (RUN_SIMPLE_MODELS) {
@@ -833,7 +840,6 @@ if (RUN_SIMPLE_MODELS) {
   plan(sequential)
   cat("\n✅ Simple models analysis complete.\n")
   
-  
   # --- D. Calculate Performance Metrics and Combine Results ---
   cat("--- Integrating simple model results... ---\n")
   
@@ -841,16 +847,27 @@ if (RUN_SIMPLE_MODELS) {
   simple_results_summary <- simple_models_output %>%
     group_by(Model, SplitSet) %>%
     summarise(
-      R2 = cor(actual, predicted)^2,
-      RMSE = sqrt(mean((actual - predicted)^2)),
-      RPD = sd(actual) / RMSE,
+      # Calculate Sums of Squares
+      RSS = sum((actual - predicted)^2),
+      TSS = sum((actual - mean(actual))^2),
+      n = n(),
+      
+      # Compute Metrics using RSS/TSS (Standard definition)
+      RMSE = sqrt(RSS / n),
+      R2 = 1 - (RSS / TSS),
+      RPD = sd(actual) / sqrt(RSS / n),
       Bias = mean(predicted - actual),
-      PercentRMSE = RMSE / max(actual) * 100,
+      PercentRMSE = (sqrt(RSS / n) / max(actual)) * 100,
       .groups = "drop"
     ) %>%
+    select(-RSS, -TSS, -n) %>% # Remove helper columns
     mutate(
       ModelType = "Simple",
-      Components = 3 # length + structure_weight + weight
+      # Add component columns to match the schema of the main analysis results
+      Components = 3,
+      Mean_Components = 3,
+      Min_Components = 3,
+      Max_Components = 3
     )
   
   # 2. Format the predictions to match the complex models' output
@@ -873,6 +890,45 @@ if (RUN_SIMPLE_MODELS) {
   final_predictions_df <- bind_rows(final_predictions_df, simple_predictions_df)
   
   cat("✅ Simple model results integrated.\n")
+  # # --- D. Calculate Performance Metrics and Combine Results ---
+  # cat("--- Integrating simple model results... ---\n")
+  # 
+  # # 1. Calculate performance metrics for each model and split
+  # simple_results_summary <- simple_models_output %>%
+  #   group_by(Model, SplitSet) %>%
+  #   summarise(
+  #     R2 = cor(actual, predicted)^2,
+  #     RMSE = sqrt(mean((actual - predicted)^2)),
+  #     RPD = sd(actual) / RMSE,
+  #     Bias = mean(predicted - actual),
+  #     PercentRMSE = RMSE / max(actual) * 100,
+  #     .groups = "drop"
+  #   ) %>%
+  #   mutate(
+  #     ModelType = "Simple",
+  #     Components = 3 # length + structure_weight + weight
+  #   )
+  # 
+  # # 2. Format the predictions to match the complex models' output
+  # simple_predictions_df <- simple_models_output %>%
+  #   select(
+  #     split_set = SplitSet,
+  #     fold = Fold,
+  #     model_variant = Model,
+  #     specimen_number,
+  #     actual,
+  #     predicted
+  #   ) %>%
+  #   mutate(
+  #     model_type = "Simple",
+  #     components = 3
+  #   )
+  # 
+  # # 3. Combine with the main results dataframes
+  # final_results_summary <- bind_rows(final_results_summary, simple_results_summary)
+  # final_predictions_df <- bind_rows(final_predictions_df, simple_predictions_df)
+  # 
+  # cat("✅ Simple model results integrated.\n")
 }
 
 # --- 7. FINAL SAVE ---
